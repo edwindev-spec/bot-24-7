@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#090d18">
+  <meta name="description" content="Panel de estado del bot de Discord Prometheus Recover.">
+  <title>Prometheus Recover · Estado del bot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080b14;--panel:#111827;--panel2:#0e1523;--line:#263246;--text:#edf3ff;--muted:#94a3b8;--blue:#8db8ff;--green:#55d6a1;--red:#ff7185;--amber:#ffcd70}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 85% 0%,#182b4b 0,transparent 35%),radial-gradient(ellipse at 0% 70%,#18213a 0,transparent 32%),var(--bg);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text)}
+    .wrap{max-width:1000px;margin:auto;padding:38px 22px 54px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:46px}.brand{display:flex;gap:13px;align-items:center}.logo{width:44px;height:44px;border:1px solid #3b5275;border-radius:14px;background:linear-gradient(135deg,#223c66,#111827);display:grid;place-items:center;color:var(--blue);font-size:23px;font-weight:800}.brand-name{font-size:15px;font-weight:750;letter-spacing:.01em}.eyebrow{font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted)}.tag{border:1px solid var(--line);background:#0f1727;border-radius:999px;color:#bccbe0;padding:7px 11px;font-size:12px;white-space:nowrap}
+    .hero{max-width:670px;margin-bottom:30px}.hero h1{font-size:clamp(33px,6vw,54px);line-height:1.07;letter-spacing:-.045em;margin:12px 0 14px}.hero h1 span{color:var(--blue)}.hero p{max-width:630px;color:var(--muted);font-size:16px;margin:0}
+    .grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(260px,.7fr);gap:16px}.card{background:linear-gradient(145deg,rgba(21,31,49,.96),rgba(13,19,32,.96));border:1px solid var(--line);border-radius:20px;padding:23px;box-shadow:0 18px 60px #00000020}.status-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.12em}.status-line{display:flex;gap:12px;align-items:center;margin:23px 0 7px}.status-dot{width:11px;height:11px;border-radius:50%;background:#526176;box-shadow:0 0 0 5px #52617620;flex:none}.status-title{font-size:28px;font-weight:760;letter-spacing:-.03em}.status-copy{color:var(--muted);min-height:24px}.status-meta{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:24px}.metric{background:#0b1220;border:1px solid #202d41;border-radius:13px;padding:14px}.metric small{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.metric strong{font-size:16px;overflow-wrap:anywhere}.form-label{display:block;font-size:13px;color:#ced8e8;margin:20px 0 7px}.input{width:100%;padding:12px 13px;border-radius:11px;border:1px solid #33435b;background:#080e19;color:var(--text);outline:none;font:inherit}.input:focus{border-color:#8db8ff;box-shadow:0 0 0 3px #8db8ff20}.help{color:var(--muted);font-size:12px;margin:8px 0 0}.actions{display:flex;gap:9px;margin-top:15px;flex-wrap:wrap}.btn{border:1px solid #344661;background:#1a2940;color:var(--text);border-radius:10px;padding:10px 13px;font:inherit;font-weight:650;cursor:pointer}.btn.primary{background:#a7c9ff;color:#0a1424;border-color:#a7c9ff}.btn:disabled{opacity:.65;cursor:wait}.steps{display:grid;gap:15px;margin-top:17px}.step{display:flex;gap:12px;align-items:flex-start}.stepnum{width:27px;height:27px;flex:none;border:1px solid #3b4e6b;border-radius:8px;display:grid;place-items:center;color:var(--blue);font-size:12px;font-weight:750}.step strong{display:block;font-size:14px;margin-bottom:3px}.step p{margin:0;color:var(--muted);font-size:13px}.foot{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;color:#73829a;font-size:12px;margin-top:28px;border-top:1px solid #202a3a;padding-top:18px}.inline{color:var(--blue);text-decoration:none}.inline:hover{text-decoration:underline}
+    .ok .status-dot{background:var(--green);box-shadow:0 0 0 5px #55d6a120}.bad .status-dot{background:var(--red);box-shadow:0 0 0 5px #ff718520}.wait .status-dot{background:var(--amber);box-shadow:0 0 0 5px #ffcd7020}.ok .status-title{color:var(--green)}.bad .status-title{color:var(--red)}.wait .status-title{color:var(--amber)}
+    @media(max-width:760px){.grid{grid-template-columns:1fr}.top{margin-bottom:34px}.hero{margin-bottom:22px}.card{padding:19px}.tag{white-space:normal;text-align:center}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><div class="logo">P</div><div><div class="brand-name">Prometheus Recover</div><div class="eyebrow">Discord bot · Control panel</div></div></div>
+    <div class="tag">Live status monitor</div>
+  </header>
+  <section class="hero">
+    <div class="eyebrow">Servicio de bot</div>
+    <h1>Tu bot, <span>siempre visible.</span></h1>
+    <p>Consulta si el servicio está activo y si mantiene conexión con Discord. Esta página es el panel web; el proceso del bot se ejecuta en un servicio persistente separado.</p>
+  </section>
+  <main class="grid">
+    <section class="card" id="statusCard">
+      <div class="status-head"><div class="label">Estado de conexión</div><div class="tag" id="lastCheck">Sin comprobar</div></div>
+      <div class="status-line"><span class="status-dot"></span><div class="status-title" id="statusTitle">Sin configurar</div></div>
+      <div class="status-copy" id="statusCopy">Añade la URL pública del servicio del bot para consultar su estado.</div>
+      <div class="status-meta">
+        <div class="metric"><small>Cuenta del bot</small><strong id="botUser">—</strong></div>
+        <div class="metric"><small>Tiempo de proceso</small><strong id="uptime">—</strong></div>
+      </div>
+      <label class="form-label" for="endpoint">URL del servicio de bot</label>
+      <input class="input" id="endpoint" type="url" placeholder="https://tu-servicio.up.railway.app" autocomplete="url" spellcheck="false">
+      <p class="help">Pega la URL pública de Railway o Render. El panel añadirá <code>/health</code> automáticamente.</p>
+      <div class="actions"><button class="btn primary" id="checkBtn">Comprobar estado</button><button class="btn" id="saveBtn">Guardar URL</button></div>
+      <p class="help" id="helpMsg" role="status" aria-live="polite"></p>
+    </section>
+    <aside class="card">
+      <div class="label">Puesta en marcha</div>
+      <div class="steps">
+        <div class="step"><div class="stepnum">01</div><div><strong>Despliega el bot</strong><p>Publica la carpeta <code>bot/</code> como servicio Docker persistente en Railway o Render.</p></div></div>
+        <div class="step"><div class="stepnum">02</div><div><strong>Configura los secretos</strong><p>Añade <code>DISCORD_TOKEN</code> y <code>DISCORD_OWNER_ID</code> en las variables del proveedor.</p></div></div>
+        <div class="step"><div class="stepnum">03</div><div><strong>Publica esta web</strong><p>Importa la carpeta <code>web/</code> en Vercel como proyecto estático.</p></div></div>
+        <div class="step"><div class="stepnum">04</div><div><strong>Vincula el estado</strong><p>Pega aquí la URL pública del servicio. El panel se actualizará automáticamente.</p></div></div>
+      </div>
+    </aside>
+  </main>
+  <footer class="foot"><span>Prometheus Recover · Panel de estado</span><span>El token de Discord nunca se solicita ni se guarda en esta web.</span></footer>
+</div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const endpoint = $('endpoint'), card = $('statusCard'), title = $('statusTitle'), copy = $('statusCopy');
+  const botUser = $('botUser'), uptime = $('uptime'), lastCheck = $('lastCheck'), helpMsg = $('helpMsg'), checkBtn = $('checkBtn');
+  const saved = localStorage.getItem('prometheusBotStatusUrl') || new URLSearchParams(location.search).get('status') || '';
+  endpoint.value = saved;
+  let timer = null;
+  function setState(state, heading, detail) {
+    card.classList.remove('ok','bad','wait'); if (state) card.classList.add(state);
+    title.textContent = heading; copy.textContent = detail;
+  }
+  function prettyTime(n) {
+    if (!Number.isFinite(n) || n < 0) return '—';
+    const s = Math.floor(n), d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60), sec=s%60;
+    return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : m ? `${m} min ${sec} s` : `${sec} s`;
+  }
+  async function check() {
+    let root = endpoint.value.trim().replace(/\/+$/,'');
+    if (!root) { setState('', 'Sin configurar', 'Añade la URL pública del servicio del bot para consultar su estado.'); botUser.textContent='—'; uptime.textContent='—'; lastCheck.textContent='Sin comprobar'; helpMsg.textContent=''; return; }
+    if (!/^https?:\/\//i.test(root)) { setState('bad','URL no válida','La URL debe empezar por https:// (o http:// para pruebas locales).'); helpMsg.textContent=''; return; }
+    checkBtn.disabled=true; checkBtn.textContent='Comprobando…'; helpMsg.textContent=''; setState('wait','Comprobando…','Consultando el endpoint /health del servicio.');
+    const controller = new AbortController(); const timeout=setTimeout(()=>controller.abort(),9000);
+    try {
+      const response = await fetch(root + '/health', {cache:'no-store',signal:controller.signal});
+      const data = await response.json().catch(()=>({}));
+      lastCheck.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      botUser.textContent = data.bot_user || '—'; uptime.textContent = prettyTime(Number(data.uptime_seconds));
+      if (response.ok && data.discord_connected === true) setState('ok','En línea','El proceso está activo y el bot tiene conexión con Discord.');
+      else if (data.status === 'starting' || data.discord_connected === false) setState('wait','Iniciando','El servicio responde, pero el bot aún no confirma conexión con Discord.');
+      else setState('bad','No disponible','El endpoint respondió, pero no confirmó que el bot esté conectado. Revisa los logs del servicio.');
+    } catch (err) {
+      botUser.textContent='—'; uptime.textContent='—'; lastCheck.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      setState('bad','Sin conexión',err.name==='AbortError'?'La comprobación superó 9 segundos.':'No se pudo consultar /health. Verifica la URL, el despliegue y la conectividad.');
+      helpMsg.textContent='Si la URL es correcta, revisa los logs del servicio y que esté escuchando en el puerto PORT.';
+    } finally { clearTimeout(timeout); checkBtn.disabled=false; checkBtn.textContent='Comprobar estado'; }
+  }
+  $('saveBtn').addEventListener('click', () => { localStorage.setItem('prometheusBotStatusUrl',endpoint.value.trim().replace(/\/+$/,'')); helpMsg.textContent='URL guardada en este navegador.'; check(); });
+  checkBtn.addEventListener('click',check);
+  endpoint.addEventListener('keydown',e=>{if(e.key==='Enter'){localStorage.setItem('prometheusBotStatusUrl',endpoint.value.trim().replace(/\/+$/,''));check();}});
+  if (saved) check();
+  timer=setInterval(()=>{if(endpoint.value.trim()) check();},30000);
+})();
+</script>
+</body>
+</html>
