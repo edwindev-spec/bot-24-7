@@ -8,7 +8,7 @@ Recomendado: Railway con Docker. También puedes desplegar la misma carpeta Dock
 
 1. Sube este proyecto a un repositorio privado de GitHub.
 2. En Railway crea un proyecto desde ese repositorio.
-3. Configura **Root Directory** como `/bot`, para que Railway detecte `bot/Dockerfile`.
+3. Deja **Root Directory** vacío (la raíz del repositorio). El `Dockerfile` y `railway.toml` de la raíz configuran automáticamente el servicio; no uses el builder Railpack.
 4. Añade las variables de entorno `DISCORD_TOKEN` y `DISCORD_OWNER_ID`.
 5. Despliega y espera a que los logs indiquen que el bot se ha conectado a Discord.
 6. Genera un dominio público para el servicio. La ruta `https://TU-DOMINIO/health` devolverá su estado.
