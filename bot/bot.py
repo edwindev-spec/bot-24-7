@@ -232,17 +232,37 @@ def create_bot(owner_id):
             downloadable.close()
 
     @bot.command(name="deobf")
-    async def deobf(ctx):
+    async def deobf(ctx, url: str = ""):
         if ctx.author.id != owner_id:
             return
+        url = url.strip().strip("<>")
         attachments = ctx.message.attachments
-        if len(attachments) != 1 or not attachments[0].filename.lower().endswith((".lua", ".txt")):
-            await ctx.send("Envía `.deobf` y adjunta un único archivo `.lua` o `.txt` en ese mensaje.")
+        if url and attachments:
+            await ctx.send("Usa una URL o adjunta un archivo, no ambos a la vez.")
             return
-        attachment = attachments[0]
-        if attachment.size > MAX_INPUT:
+        if not url and (len(attachments) != 1 or not attachments[0].filename.lower().endswith((".lua", ".txt"))):
+            await ctx.send("Uso: `.deobf <URL>` o adjunta un único archivo `.lua` o `.txt`.")
+            return
+        if not url and attachments[0].size > MAX_INPUT:
             await ctx.send("El archivo debe pesar como máximo 2 MiB.")
             return
+        if url:
+            try:
+                parsed = urlsplit(url)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                    raise ValueError
+                hostname = parsed.hostname.rstrip(".").lower()
+                if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".localhost", ".local")):
+                    raise ValueError
+                try:
+                    address = ipaddress.ip_address(hostname)
+                except ValueError:
+                    address = None
+                if address is not None and not address.is_global:
+                    raise ValueError
+            except (ValueError, UnicodeError):
+                await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
+                return
         if BUSY.locked():
             await ctx.send("Estoy procesando otro archivo. Inténtalo cuando termine.")
             return
@@ -250,7 +270,25 @@ def create_bot(owner_id):
             started = time.perf_counter()
             progress = asyncio.create_task(delayed_progress(ctx))
             try:
-                input_data = await asyncio.wait_for(attachment.read(), timeout=30)
+                if url:
+                    timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
+                    async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                        async with session.get(url, allow_redirects=False) as response:
+                            if 300 <= response.status < 400:
+                                raise ProcessingError("La URL redirige. Usa el enlace directo al archivo raw.")
+                            if response.status != 200:
+                                raise ProcessingError(f"La URL respondió con HTTP {response.status}.")
+                            chunks = []
+                            total = 0
+                            async for chunk in response.content.iter_chunked(64 * 1024):
+                                total += len(chunk)
+                                if total > MAX_INPUT:
+                                    raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
+                                chunks.append(chunk)
+                            input_data = b"".join(chunks)
+                else:
+                    attachment = attachments[0]
+                    input_data = await asyncio.wait_for(attachment.read(), timeout=30)
                 if len(input_data) > MAX_INPUT:
                     raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
                 key = hashlib.sha256(input_data).digest()
@@ -283,7 +321,9 @@ def create_bot(owner_id):
             except ProcessingError as error:
                 await ctx.send(str(error))
             except asyncio.TimeoutError:
-                await ctx.send("La descarga del adjunto tardó demasiado. Inténtalo de nuevo.")
+                await ctx.send("La descarga tardó demasiado. Inténtalo de nuevo.")
+            except (aiohttp.ClientError, OSError):
+                await ctx.send("No pude descargar esa URL. Comprueba que sea pública y accesible.")
             except Exception:
                 await ctx.send("No pude completar la operación. Revisa el archivo y los permisos del bot.")
             finally:
