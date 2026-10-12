@@ -35,7 +35,7 @@ La web guarda la URL en el navegador local, no en el servidor. El token de Disco
 
 ## 3. Usar el bot
 
-Envía `.deobf` con un único archivo `.lua` o `.txt` de hasta 2 MiB para recuperar el código. También puedes usar `.get <URL>` para descargar el contenido de una URL pública HTTP(S) y recibirlo como `raw.txt` (máximo 2 MiB; usa enlaces directos al contenido raw, sin redirecciones). Ambos comandos solo responden al `DISCORD_OWNER_ID` configurado.
+Envía `.deobf` con un único archivo `.lua` o `.txt` de hasta 2 MiB para recuperar el código. También puedes usar `.get <URL>` para descargar el contenido de una URL pública HTTP(S) y recibirlo como `raw.txt` (máximo 2 MiB). `.get` sigue hasta cinco redirecciones y valida cada destino; no puede descargar direcciones privadas ni páginas protegidas que no entreguen el contenido directamente. Ambos comandos solo responden al `DISCORD_OWNER_ID` configurado.
 
 ## Seguridad y funcionamiento
 

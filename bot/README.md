@@ -4,4 +4,4 @@ Esta carpeta se despliega como contenedor Docker persistente. Configura `DISCORD
 
 No ejecutes el bot como una Vercel Function: necesita una conexión continua con Discord Gateway.
 
-Comandos: `.deobf` procesa un adjunto Lua/TXT; `.get <URL>` descarga una URL pública HTTP(S) y devuelve `raw.txt`. `.get` admite hasta 2 MiB y requiere un enlace directo (no redirecciones). Ambos comandos están restringidos a `DISCORD_OWNER_ID`.
+Comandos: `.deobf` procesa un adjunto Lua/TXT; `.get <URL>` descarga una URL pública HTTP(S) y devuelve `raw.txt` (máximo 2 MiB). `.get` sigue hasta cinco redirecciones, validando cada destino, y no descarga direcciones privadas ni páginas protegidas que no expongan directamente el contenido. Ambos comandos están restringidos a `DISCORD_OWNER_ID`.
