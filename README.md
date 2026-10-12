@@ -35,7 +35,7 @@ La web guarda la URL en el navegador local, no en el servidor. El token de Disco
 
 ## 3. Usar el bot
 
-Envía en Discord un mensaje `.deobf` y adjunta un único archivo `.lua` o `.txt` de hasta 2 MiB. El bot devuelve `resultado.lua` cuando el análisis termina. Se mantiene la restricción del notebook: solo responde al `DISCORD_OWNER_ID` configurado.
+Envía `.deobf` con un único archivo `.lua` o `.txt` de hasta 2 MiB para recuperar el código. También puedes usar `.get <URL>` para descargar el contenido de una URL pública HTTP(S) y recibirlo como `raw.txt` (máximo 2 MiB; usa enlaces directos al contenido raw, sin redirecciones). Ambos comandos solo responden al `DISCORD_OWNER_ID` configurado.
 
 ## Seguridad y funcionamiento
 

@@ -2,13 +2,16 @@
 import asyncio
 import hashlib
 import io
+import ipaddress
 import shutil
 import os
 import tempfile
 import time
 from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import aiohttp
 import discord
 from aiohttp import web
 from discord.ext import commands
@@ -161,6 +164,72 @@ def create_bot(owner_id):
     @bot.event
     async def on_ready():
         print(f"Prometheus Recover conectado como {bot.user}. Envía .deobf con un archivo .lua o .txt.")
+
+    @bot.command(name="get")
+    async def get_raw(ctx, url: str = ""):
+        """Fetch a public HTTP(S) text URL and return its content as a .txt file."""
+        if ctx.author.id != owner_id:
+            return
+        url = url.strip().strip("<>")
+        if not url:
+            await ctx.send("Uso: `.get <URL>`")
+            return
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise ValueError
+            if parsed.username or parsed.password:
+                raise ValueError
+            hostname = parsed.hostname.rstrip(".").lower()
+            if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost") or hostname.endswith(".local"):
+                raise ValueError
+            try:
+                address = ipaddress.ip_address(hostname)
+            except ValueError:
+                address = None
+            if address is not None and (not address.is_global):
+                raise ValueError
+        except (ValueError, UnicodeError):
+            await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
+            return
+
+        timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                async with session.get(url, allow_redirects=False) as response:
+                    if 300 <= response.status < 400:
+                        await ctx.send("La URL redirige. Usa el enlace directo al contenido raw.")
+                        return
+                    if response.status != 200:
+                        await ctx.send(f"La URL respondió con HTTP {response.status}; no se creó el archivo.")
+                        return
+                    chunks = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > MAX_INPUT:
+                            await ctx.send("El contenido supera el límite de 2 MiB.")
+                            return
+                        chunks.append(chunk)
+                    raw_data = b"".join(chunks)
+        except asyncio.TimeoutError:
+            await ctx.send("La descarga superó el tiempo límite de 25 segundos.")
+            return
+        except (aiohttp.ClientError, OSError):
+            await ctx.send("No pude descargar esa URL. Comprueba que sea pública y accesible.")
+            return
+
+        # Save as UTF-8 text even if the source contains malformed byte sequences.
+        text_data = raw_data.decode("utf-8-sig", errors="replace").encode("utf-8")
+        upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
+        if len(text_data) > upload_limit:
+            await ctx.send("El archivo resultante supera el límite de archivos de este servidor de Discord.")
+            return
+        downloadable = discord.File(io.BytesIO(text_data), filename="raw.txt")
+        try:
+            await ctx.send(f"Contenido descargado ({len(text_data)} bytes):", file=downloadable)
+        finally:
+            downloadable.close()
 
     @bot.command(name="deobf")
     async def deobf(ctx):
