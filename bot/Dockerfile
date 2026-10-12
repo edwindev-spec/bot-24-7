@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv
 
+# StyLua makes successful recoveries readable instead of merely removing obfuscation.
+RUN npm install --global @johnnymorganz/stylua-bin \
+    && stylua --version
+
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
