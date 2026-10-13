@@ -18,6 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LURAPH_RECOVER_DIR=/app/luraph-fusion \
     LURAPH_CACHE_DIR=/app/cache \
     IRONBREW_DEOBF_PATH=/app/ironbrew/IronbrewAdapter \
+    UNPROM_SCRIPT_PATH=/app/unprom-tool/unprom.py \
     PATH=/opt/venv/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv git lua5.1 ca-certificates cmake build-essential libicu72 libssl3 \
@@ -37,6 +38,14 @@ RUN git init /app/prometheus-recover \
     && git -C /app/prometheus-recover remote add origin https://github.com/edwin-dev67/coderabit.git \
     && git -C /app/prometheus-recover fetch --depth=1 origin ${PROMETHEUS_COMMIT} \
     && git -C /app/prometheus-recover checkout --detach FETCH_HEAD
+
+ARG UNPROM_COMMIT=d37b9d97746160359fb68dbdbb5213317403e669
+RUN git init /app/unprom-tool \
+    && git -C /app/unprom-tool remote add origin https://github.com/yennylol/unprom.git \
+    && git -C /app/unprom-tool fetch --depth=1 origin ${UNPROM_COMMIT} \
+    && git -C /app/unprom-tool checkout --detach FETCH_HEAD \
+    && mkdir -p /app/licenses \
+    && cp /app/unprom-tool/LICENSE /app/licenses/UNPROM-MIT.txt
 
 COPY --from=ironbrew-build /out/ /app/ironbrew/
 COPY --from=ironbrew-build /src/IronbrewDeobfuscator/LICENSE /app/licenses/IRONBREW-GPL-3.0.txt

@@ -201,6 +201,97 @@ class Deobfuscator:
         await self._stop()
 
 
+class UnpromDeobfuscator:
+    """Run the pinned, standard-library-only unprom CLI in an isolated process."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "unprom-tool" / "unprom.py"
+        self.script = Path(os.environ.get("UNPROM_SCRIPT_PATH", str(default))).resolve()
+        self.python = sys.executable
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {"PATH": os.defpath, "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"}
+
+    async def prepare(self):
+        if not self.script.is_file():
+            raise ProcessingError("No encuentro unprom. Reconstruye y despliega la imagen Docker.")
+        process = await asyncio.create_subprocess_exec(
+            self.python, str(self.script), "--list-passes",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=self.environment, start_new_session=os.name != "nt")
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+            if process.returncode or b"available passes:" not in output:
+                raise ProcessingError("No pude iniciar el motor unprom.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("unprom no respondió al iniciar.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(process.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await killer.wait()
+        await process.wait()
+
+    async def run(self, source, timeout=90):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            result = source.parent / "resultado.lua"
+            try:
+                result.unlink()
+            except FileNotFoundError:
+                pass
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    self.python, str(self.script), str(source.resolve()), "--output", str(result.resolve()),
+                    cwd=str(source.parent), env=self.environment, stdout=log, stderr=log,
+                    start_new_session=os.name != "nt")
+                self.process = process
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo superó el tiempo permitido por unprom.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0:
+                    raise ProcessingError("unprom no pudo analizar este archivo; verifica que sea Lua/Prometheus compatible.")
+                if not result.is_file() or result.stat().st_size == 0:
+                    raise ProcessingError("unprom no produjo código para este archivo.")
+                if result.stat().st_size > 32 * 1024 * 1024:
+                    raise ProcessingError("El resultado de unprom supera el límite de 32 MiB.")
+                return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class LuraphDeobfuscator(Deobfuscator):
     """Run Fusion without Discord credentials in its environment."""
 
@@ -446,11 +537,13 @@ class DeobfBot(commands.Bot):
         self.engine = Deobfuscator()
         self.luraph_engine = LuraphDeobfuscator()
         self.ironbrew_engine = IronbrewDeobfuscator()
+        self.testdeobf_engine = UnpromDeobfuscator()
         self.engine_errors = {}
 
     async def setup_hook(self):
         for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
-                             ("ironbrew", self.ironbrew_engine)):
+                             ("ironbrew", self.ironbrew_engine),
+                             ("testdeobf", self.testdeobf_engine)):
             try:
                 await engine.prepare()
             except (ProcessingError, OSError) as error:
@@ -465,6 +558,7 @@ class DeobfBot(commands.Bot):
             await self.engine.close()
             await self.luraph_engine.close()
             await self.ironbrew_engine.close()
+            await self.testdeobf_engine.close()
 
 
 def create_bot(owner_id):
@@ -479,6 +573,7 @@ def create_bot(owner_id):
             store = None
     luraph_cache = ResultCache(store=store)
     ironbrew_cache = ResultCache()
+    testdeobf_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -487,7 +582,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph y .ironbrew.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .testdeobf, .luraph e .ironbrew.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -497,10 +592,11 @@ def create_bot(owner_id):
             "`.help` — Muestra esta lista.\n"
             "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB).\n"
             "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
+            "`.testdeobf <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — alternativa experimental unprom para Prometheus; devuelve Lua de texto.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf`, `.luraph` y `.ironbrew` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.testdeobf`, `.luraph` y `.ironbrew` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -727,6 +823,10 @@ def create_bot(owner_id):
     @bot.command(name="deobf")
     async def deobf(ctx, url: str = ""):
         await process_attachment(ctx, url, bot.engine, cache, "deobf")
+
+    @bot.command(name="testdeobf")
+    async def testdeobf(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.testdeobf_engine, testdeobf_cache, "testdeobf")
 
     @bot.command(name="luraph")
     async def luraph(ctx, url: str = "", version: str = ""):
