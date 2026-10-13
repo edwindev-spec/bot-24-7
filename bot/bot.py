@@ -395,6 +395,19 @@ def create_bot(owner_id):
     async def on_ready():
         print(f"Recover conectado como {bot.user}. Envía .luraph con un archivo .lua, .luau o .txt; .deobf usa Prometheus.")
 
+    @bot.command(name="help")
+    async def show_help(ctx):
+        """List the available bot commands and their basic usage."""
+        await ctx.send(
+            "**Comandos disponibles**\n"
+            "`.help` — Muestra esta lista.\n"
+            "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB).\n"
+            "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
+            "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
+            "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
+            "Los comandos `.get`, `.deobf` y `.luraph` están restringidos al propietario configurado del bot."
+        )
+
     @bot.command(name="get")
     async def get_raw(ctx, url: str = ""):
         """Fetch a public HTTP(S) text URL and return its content as a .txt file."""

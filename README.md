@@ -35,7 +35,7 @@ La web guarda la URL en el navegador local, no en el servidor. El token de Disco
 
 ## 3. Usar el bot
 
-Envía `.luraph` con un único adjunto `.lua`, `.luau` o `.txt` de hasta 2 MiB para procesar Luraph v14.7–v15. Si el archivo no tiene cabecera, indica la versión, por ejemplo `.luraph 14.8` junto con el adjunto. El primer uso puede preparar el motor durante varios minutos. `.deobf` conserva el procesamiento Prometheus para adjuntos `.lua` o `.txt`; `.get <URL>` descarga contenido HTTP(S) público y lo devuelve como `raw.txt` (máximo 2 MiB), siguiendo hasta cinco redirecciones y validando cada destino. Los comandos de procesamiento solo responden al `DISCORD_OWNER_ID` configurado.
+Envía `.help` en Discord para ver la lista de comandos y sus usos. `.luraph` procesa un único adjunto `.lua`, `.luau` o `.txt` de hasta 2 MiB para Luraph v14.7–v15; sin cabecera, indica la versión, por ejemplo `.luraph 14.8` junto con el adjunto. `.deobf` conserva el procesamiento Prometheus para adjuntos `.lua`/`.txt` o URL directa; `.get <URL>` descarga contenido HTTP(S) público y lo devuelve como `raw.txt` (máximo 2 MiB), siguiendo hasta cinco redirecciones y validando cada destino. `.get`, `.deobf` y `.luraph` solo responden al `DISCORD_OWNER_ID` configurado.
 
 Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render. El motor Luraph va incluido como fuente licenciada y sus herramientas se compilan durante la construcción; reiniciar un contenedor antiguo no incorpora esta actualización.
 
