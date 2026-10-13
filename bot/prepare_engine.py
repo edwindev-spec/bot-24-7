@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-ENGINE_REVISION = "abf3d61fbcd4025e2423fda47f19dc491d13cc2e"
+ENGINE_REVISION = "0d2becf3eb4122784b187214a20397703b5a634f"
 ENGINE_REPOSITORY = "https://github.com/EdwinVM-luraph/luraph.git"
 
 

@@ -19,6 +19,8 @@ import discord
 from aiohttp import web
 from discord.ext import commands
 
+from result_cache import ResultStore, engine_namespace
+
 DEOBF_DIR = Path(os.environ.get(
     "DEOBF_RECOVER_DIR", str(Path(__file__).resolve().parent / "prometheus-recover")
 )).resolve()
@@ -51,7 +53,8 @@ class ProcessingError(Exception):
 class ResultCache:
     """Keep a bounded set of successful results for this bot session."""
 
-    def __init__(self, max_bytes=128 * 1024 * 1024, max_entries=128):
+    def __init__(self, max_bytes=128 * 1024 * 1024, max_entries=128, store=None):
+        self.store = store
         self.max_bytes = max_bytes
         self.max_entries = max_entries
         self.entries = OrderedDict()
@@ -62,6 +65,19 @@ class ResultCache:
         if value is not None:
             self.entries.move_to_end(key)
         return value
+
+    async def async_get(self, key):
+        value = self.get(key)
+        if value is None and self.store is not None:
+            value = await asyncio.to_thread(self.store.get, key)
+            if value is not None:
+                self.put(key, value)
+        return value
+
+    async def async_put(self, key, value):
+        self.put(key, value)
+        if self.store is not None:
+            await asyncio.to_thread(self.store.put, key, value)
 
     def put(self, key, value):
         if len(value) > self.max_bytes:
@@ -360,7 +376,15 @@ class DeobfBot(commands.Bot):
 
 def create_bot(owner_id):
     cache = ResultCache()
-    luraph_cache = ResultCache()
+    cache_directory = os.environ.get("LURAPH_CACHE_DIR")
+    store = None
+    if cache_directory:
+        try:
+            store = ResultStore(cache_directory, engine_namespace(find_luraph_directory(), __file__))
+        except OSError:
+            # Cache storage is optional; recovery still works without it.
+            store = None
+    luraph_cache = ResultCache(store=store)
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -514,45 +538,45 @@ def create_bot(owner_id):
             except (ValueError, UnicodeError):
                 await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
                 return
-        if BUSY.locked():
-            await ctx.send("Estoy procesando otro archivo. Inténtalo cuando termine.")
-            return
-        async with BUSY:
-            started = time.perf_counter()
-            progress = asyncio.create_task(delayed_progress(ctx))
-            try:
-                if command == "luraph":
-                    if command in bot.engine_errors:
-                        await ctx.send("Preparando el motor Luraph… La primera compilación puede tardar varios minutos.")
-                    await engine.ensure_ready()
-                    bot.engine_errors.pop("luraph", None)
-                if url:
-                    timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
-                    async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                        async with session.get(url, allow_redirects=False) as response:
-                            if 300 <= response.status < 400:
-                                raise ProcessingError("La URL redirige. Usa el enlace directo al archivo raw.")
-                            if response.status != 200:
-                                raise ProcessingError(f"La URL respondió con HTTP {response.status}.")
-                            chunks = []
-                            total = 0
-                            async for chunk in response.content.iter_chunked(64 * 1024):
-                                total += len(chunk)
-                                if total > MAX_INPUT:
-                                    raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
-                                chunks.append(chunk)
-                            input_data = b"".join(chunks)
-                else:
-                    attachment = attachments[0]
-                    input_data = await asyncio.wait_for(attachment.read(), timeout=30)
-                if len(input_data) > MAX_INPUT:
-                    raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
-                key = hashlib.sha256(version.encode() + b"\0" + input_data).digest()
-                cached = cache.get(key)
-                if cached is not None:
-                    # Cache hit: avoid creating a temp directory and writing the result to disk.
-                    result_data = cached
-                else:
+        started = time.perf_counter()
+        progress = asyncio.create_task(delayed_progress(ctx))
+        try:
+            if url:
+                timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
+                async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                    async with session.get(url, allow_redirects=False) as response:
+                        if 300 <= response.status < 400:
+                            raise ProcessingError("La URL redirige. Usa el enlace directo al archivo raw.")
+                        if response.status != 200:
+                            raise ProcessingError(f"La URL respondió con HTTP {response.status}.")
+                        chunks = []
+                        total = 0
+                        async for chunk in response.content.iter_chunked(64 * 1024):
+                            total += len(chunk)
+                            if total > MAX_INPUT:
+                                raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
+                            chunks.append(chunk)
+                        input_data = b"".join(chunks)
+            else:
+                attachment = attachments[0]
+                input_data = await asyncio.wait_for(attachment.read(), timeout=30)
+            if len(input_data) > MAX_INPUT:
+                raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
+            key = hashlib.sha256(version.encode() + b"\0" + input_data).digest()
+            cached = await cache.async_get(key)
+            if cached is not None:
+                # Cache hit: avoid creating a temp directory and writing the result to disk.
+                result_data = cached
+            else:
+                if BUSY.locked():
+                    await ctx.send("Estoy procesando otro archivo. Inténtalo cuando termine.")
+                    return
+                async with BUSY:
+                    if command == "luraph":
+                        if command in bot.engine_errors:
+                            await ctx.send("Preparando el motor Luraph… La primera compilación puede tardar varios minutos.")
+                        await engine.ensure_ready()
+                        bot.engine_errors.pop("luraph", None)
                     with tempfile.TemporaryDirectory(prefix="deobf-") as folder:
                         source = Path(folder) / "entrada.lua"
                         source.write_bytes(input_data)
@@ -561,35 +585,35 @@ def create_bot(owner_id):
                         else:
                             result_data = await engine.run(source)
                     if len(result_data) <= cache.max_bytes:
-                        cache.put(key, result_data)
-                upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
-                if len(result_data) > upload_limit:
-                    raise ProcessingError("El resultado supera el límite de archivos de Discord.")
-                progress.cancel()
-                await asyncio.gather(progress, return_exceptions=True)
-                elapsed = time.perf_counter() - started
-                detail = " (desde caché)" if cached is not None else ""
-                if command == "luraph" and result_data.startswith(PARTIAL_HEADER):
-                    detail += " — recuperación parcial: algunos bloques no pudieron recuperarse"
-                downloadable = discord.File(io.BytesIO(result_data), filename="resultado.lua")
-                try:
-                    await ctx.send(
-                        f"Resultado en {elapsed:.2f} s{detail}:",
-                        file=downloadable,
-                    )
-                finally:
-                    downloadable.close()
-            except ProcessingError as error:
-                await ctx.send(str(error))
-            except asyncio.TimeoutError:
-                await ctx.send("La descarga tardó demasiado. Inténtalo de nuevo.")
-            except (aiohttp.ClientError, OSError):
-                await ctx.send("No pude descargar esa URL. Comprueba que sea pública y accesible.")
-            except Exception:
-                await ctx.send("No pude completar la operación. Revisa el archivo y los permisos del bot.")
+                        await cache.async_put(key, result_data)
+            upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
+            if len(result_data) > upload_limit:
+                raise ProcessingError("El resultado supera el límite de archivos de Discord.")
+            progress.cancel()
+            await asyncio.gather(progress, return_exceptions=True)
+            elapsed = time.perf_counter() - started
+            detail = " (desde caché)" if cached is not None else ""
+            if command == "luraph" and result_data.startswith(PARTIAL_HEADER):
+                detail += " — recuperación parcial: algunos bloques no pudieron recuperarse"
+            downloadable = discord.File(io.BytesIO(result_data), filename="resultado.lua")
+            try:
+                await ctx.send(
+                    f"Resultado en {elapsed:.2f} s{detail}:",
+                    file=downloadable,
+                )
             finally:
-                progress.cancel()
-                await asyncio.gather(progress, return_exceptions=True)
+                downloadable.close()
+        except ProcessingError as error:
+            await ctx.send(str(error))
+        except asyncio.TimeoutError:
+            await ctx.send("La descarga tardó demasiado. Inténtalo de nuevo.")
+        except (aiohttp.ClientError, OSError):
+            await ctx.send("No pude descargar esa URL. Comprueba que sea pública y accesible.")
+        except Exception:
+            await ctx.send("No pude completar la operación. Revisa el archivo y los permisos del bot.")
+        finally:
+            progress.cancel()
+            await asyncio.gather(progress, return_exceptions=True)
 
     @bot.command(name="deobf")
     async def deobf(ctx, url: str = ""):

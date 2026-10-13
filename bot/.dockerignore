@@ -3,3 +3,9 @@ __pycache__/
 .venv/
 .env
 .git/
+
+cache/
+*.sqlite3*
+luraph-fusion/.build/
+luraph-fusion/vendor/caomod2077/bin/luau
+luraph-fusion/vendor/caomod2077/bin/luau-ast

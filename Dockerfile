@@ -4,6 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEOBF_RECOVER_DIR=/app/prometheus-recover \
     LURAPH_RECOVER_DIR=/app/luraph-fusion \
+    LURAPH_CACHE_DIR=/app/cache \
     PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,7 +27,9 @@ RUN git init /app/prometheus-recover \
     && git -C /app/prometheus-recover checkout --detach FETCH_HEAD
 
 COPY bot/prepare_engine.py ./prepare_engine.py
+COPY bot/luraph-fusion /app/luraph-fusion
 RUN python3 /app/prepare_engine.py --skip-dependencies --jobs 2
+COPY bot/result_cache.py ./result_cache.py
 COPY bot/bot.py ./bot.py
 
 EXPOSE 8080

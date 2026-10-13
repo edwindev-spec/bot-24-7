@@ -1,0 +1,12 @@
+.git/
+.env
+.env.*
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+bot/cache/
+cache/
+**/*.sqlite3*
+**/.build/
+bot/luraph-fusion/vendor/caomod2077/bin/luau
+bot/luraph-fusion/vendor/caomod2077/bin/luau-ast
