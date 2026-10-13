@@ -7,5 +7,7 @@ __pycache__/
 cache/
 *.sqlite3*
 luraph-fusion/.build/
+ironbrew-adapter/bin/
+ironbrew-adapter/obj/
 luraph-fusion/vendor/caomod2077/bin/luau
 luraph-fusion/vendor/caomod2077/bin/luau-ast

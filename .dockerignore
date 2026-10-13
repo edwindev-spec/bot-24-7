@@ -8,5 +8,7 @@ bot/cache/
 cache/
 **/*.sqlite3*
 **/.build/
+bot/ironbrew-adapter/bin/
+bot/ironbrew-adapter/obj/
 bot/luraph-fusion/vendor/caomod2077/bin/luau
 bot/luraph-fusion/vendor/caomod2077/bin/luau-ast

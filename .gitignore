@@ -12,5 +12,7 @@ cache/
 *.sqlite3
 *.sqlite3-journal
 **/.build/
+bot/ironbrew-adapter/bin/
+bot/ironbrew-adapter/obj/
 bot/luraph-fusion/vendor/caomod2077/bin/luau
 bot/luraph-fusion/vendor/caomod2077/bin/luau-ast

@@ -350,21 +350,113 @@ class LuraphDeobfuscator(Deobfuscator):
                 return PARTIAL_HEADER + data if selected["kind"] == "partial" else data
 
 
+class IronbrewDeobfuscator:
+    """Run the pinned Ironbrew bytecode recovery adapter in a separate process."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "ironbrew" / "IronbrewAdapter"
+        self.executable = Path(os.environ.get("IRONBREW_DEOBF_PATH", str(default))).resolve()
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {"PATH": os.defpath, "LANG": "C.UTF-8"}
+
+    async def prepare(self):
+        if not self.executable.is_file() or (os.name != "nt" and not os.access(self.executable, os.X_OK)):
+            raise ProcessingError("No encuentro el motor Ironbrew. Reconstruye y despliega la imagen Docker.")
+        process = await asyncio.create_subprocess_exec(
+            str(self.executable), "--version", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, env=self.environment,
+            start_new_session=os.name != "nt")
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+            if process.returncode or b"IronbrewDeobfuscator adapter" not in output:
+                raise ProcessingError("No pude iniciar el motor Ironbrew.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("El motor Ironbrew no respondió al iniciar.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(process.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await killer.wait()
+        await process.wait()
+
+    async def run(self, source, timeout=90):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            result = source.parent / "resultado.luac"
+            try:
+                result.unlink()
+            except FileNotFoundError:
+                pass
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    str(self.executable), str(source.resolve()), str(result.resolve()),
+                    cwd=str(source.parent), env=self.environment, stdout=log, stderr=log,
+                    start_new_session=os.name != "nt")
+                self.process = process
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo Ironbrew superó el tiempo permitido.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0:
+                    raise ProcessingError("Ironbrew no pudo analizar este archivo; verifica que sea Ironbrew2 válido.")
+                if not result.is_file() or result.stat().st_size == 0:
+                    raise ProcessingError("Ironbrew no produjo bytecode para este archivo.")
+                if result.stat().st_size > 32 * 1024 * 1024:
+                    raise ProcessingError("El bytecode resultante supera el límite de 32 MiB.")
+                return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class DeobfBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.engine = Deobfuscator()
         self.luraph_engine = LuraphDeobfuscator()
+        self.ironbrew_engine = IronbrewDeobfuscator()
         self.engine_errors = {}
 
     async def setup_hook(self):
-        for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine)):
+        for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
+                             ("ironbrew", self.ironbrew_engine)):
             try:
                 await engine.prepare()
             except (ProcessingError, OSError) as error:
                 self.engine_errors[name] = str(error)
-        if len(self.engine_errors) == 2:
-            print("Motores pendientes de preparación; .luraph preparará su motor al primer uso.")
+        if self.engine_errors:
+            print("Motores no disponibles al iniciar: " + ", ".join(sorted(self.engine_errors)))
 
     async def close(self):
         try:
@@ -372,6 +464,7 @@ class DeobfBot(commands.Bot):
         finally:
             await self.engine.close()
             await self.luraph_engine.close()
+            await self.ironbrew_engine.close()
 
 
 def create_bot(owner_id):
@@ -385,6 +478,7 @@ def create_bot(owner_id):
             # Cache storage is optional; recovery still works without it.
             store = None
     luraph_cache = ResultCache(store=store)
+    ironbrew_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -393,7 +487,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Envía .luraph con un archivo .lua, .luau o .txt; .deobf usa Prometheus.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph y .ironbrew.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -404,8 +498,9 @@ def create_bot(owner_id):
             "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB).\n"
             "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
+            "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf` y `.luraph` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.luraph` y `.ironbrew` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -608,7 +703,8 @@ def create_bot(owner_id):
             detail = " (desde caché)" if cached is not None else ""
             if command == "luraph" and result_data.startswith(PARTIAL_HEADER):
                 detail += " — recuperación parcial: algunos bloques no pudieron recuperarse"
-            downloadable = discord.File(io.BytesIO(result_data), filename="resultado.lua")
+            output_name = "resultado.luac" if command == "ironbrew" else "resultado.lua"
+            downloadable = discord.File(io.BytesIO(result_data), filename=output_name)
             try:
                 await ctx.send(
                     f"Resultado en {elapsed:.2f} s{detail}:",
@@ -637,6 +733,10 @@ def create_bot(owner_id):
         if url in LURAPH_VERSIONS and not version:
             version, url = url, ""
         await process_attachment(ctx, url, bot.luraph_engine, luraph_cache, "luraph", version)
+
+    @bot.command(name="ironbrew")
+    async def ironbrew(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.ironbrew_engine, ironbrew_cache, "ironbrew")
 
     return bot
 
