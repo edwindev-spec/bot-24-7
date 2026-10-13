@@ -1,8 +1,11 @@
-"""Discord: .deobf + one Lua/text attachment. Requires discord.py, Node 22+ and Lua 5.1 compiler."""
+"""Discord: .luraph (Luraph Fusion) and .deobf (optional Prometheus)."""
 import asyncio
 import hashlib
 import io
 import ipaddress
+import json
+import signal
+import sys
 import shutil
 import os
 import tempfile
@@ -19,6 +22,13 @@ from discord.ext import commands
 DEOBF_DIR = Path(os.environ.get(
     "DEOBF_RECOVER_DIR", str(Path(__file__).resolve().parent / "prometheus-recover")
 )).resolve()
+LURAPH_DIR = Path(os.environ.get(
+    "LURAPH_RECOVER_DIR", str(Path(__file__).resolve().parent if
+    (Path(__file__).resolve().parent / "luraph" / "cli.py").is_file() else
+    Path(__file__).resolve().parent / "luraph-fusion")
+)).resolve()
+PARTIAL_HEADER = b"-- Recuperacion parcial: algunos bloques no pudieron recuperarse.\n"
+LURAPH_VERSIONS = ("14.7", "14.8", "14.9", "15")
 MAX_INPUT = 2 * 1024 * 1024
 BUSY = asyncio.Lock()
 
@@ -131,56 +141,142 @@ class Deobfuscator:
                 result = destination / filename
                 if result.stat().st_size > 32 * 1024 * 1024:
                     raise ProcessingError("El resultado supera el límite de 32 MiB.")
-                result_data = result.read_bytes()
-                # No presentar una recuperación incompleta como si fuera código íntegro.
-                if filename == "partial.lua":
-                    warning = (
-                        "-- ADVERTENCIA: Prometheus Recover solo pudo recuperar una parte del código.\n"
-                        "-- Revisa este resultado antes de usarlo; puede faltar lógica o haber fragmentos inválidos.\n\n"
-                    ).encode("utf-8")
-                    result_data = warning + result_data
-                # StyLua es opcional: si está instalado, aplicar formato Lua legible.
-                # Nunca reemplazar el resultado recuperado si el formateador falla.
-                stylua = shutil.which("stylua")
-                if stylua and filename == "recovered.lua":
-                    formatted = source.parent / "formatted.lua"
-                    formatted.write_bytes(result_data)
-                    try:
-                        format_process = await asyncio.create_subprocess_exec(
-                            stylua, "--syntax", "Lua51", str(formatted),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                            cwd=str(source.parent), env=self.environment,
-                        )
-                        await asyncio.wait_for(format_process.communicate(), timeout=15)
-                        if format_process.returncode == 0 and formatted.is_file():
-                            result_data = formatted.read_bytes()
-                    except (asyncio.TimeoutError, OSError):
-                        pass
-                return result_data
+                return result.read_bytes()
 
     async def close(self):
         self.closed = True
         await self._stop()
 
 
+class LuraphDeobfuscator(Deobfuscator):
+    """Run Fusion without Discord credentials in its environment."""
+
+    def __init__(self, repo=None):
+        super().__init__(repo or LURAPH_DIR)
+        paths = [str(Path(sys.executable).parent), os.defpath]
+        if self.node:
+            paths.insert(0, str(Path(self.node).parent))
+        self.environment = {"PATH": os.pathsep.join(paths), "LANG": "C.UTF-8"}
+
+    async def prepare(self):
+        suffix = ".exe" if os.name == "nt" else ""
+        if sys.version_info < (3, 10) or not self.node:
+            raise ProcessingError("Luraph necesita Python 3.10+ y Node.js 18+.")
+        if not (self.repo / "luraph" / "cli.py").is_file():
+            raise ProcessingError("No encuentro Luraph. Ejecuta prepare_engine.py o configura LURAPH_RECOVER_DIR.")
+        for tool in ("luau", "luau-ast"):
+            binary = self.repo / "vendor" / "caomod2077" / "bin" / (tool + suffix)
+            if not binary.is_file() or (os.name != "nt" and not os.access(binary, os.X_OK)):
+                raise ProcessingError("Faltan las herramientas Luau. Ejecuta python prepare_engine.py.")
+        process = await asyncio.create_subprocess_exec(
+            self.node, "--version", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, env=self.environment)
+        try:
+            version, _ = await asyncio.wait_for(process.communicate(), 10)
+            if process.returncode or int(version.strip().lstrip(b"v").split(b".")[0]) < 18:
+                raise ProcessingError("Luraph necesita Node.js 18+.")
+        except (ValueError, asyncio.TimeoutError):
+            raise ProcessingError("No pude verificar Node.js para Luraph.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is not None:
+            if os.name != "nt":
+                if process.returncode is None:
+                    # Fusion owns a separate worker process group. Let its
+                    # KeyboardInterrupt handler stop that group before killing
+                    # this CLI session, including on bot shutdown/cancellation.
+                    try:
+                        os.killpg(process.pid, signal.SIGINT)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(process.wait(), 5)
+                    except asyncio.TimeoutError:
+                        pass
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.returncode is None:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(process.pid),
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                await killer.wait()
+            await process.wait()
+
+    async def run(self, source, timeout=300, engine=""):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            if engine and engine not in LURAPH_VERSIONS:
+                raise ProcessingError("Versión no válida: usa 14.7, 14.8, 14.9 o 15.")
+            result = source.parent / "resultado.lua"
+            command = [sys.executable, "-m", "luraph", str(source.resolve()),
+                       "-o", str(result.resolve()), "--allow-partial", "--wall-timeout", "240"]
+            if engine:
+                command.extend(["--engine", engine])
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    *command, cwd=str(self.repo), env=self.environment,
+                    stdout=log, stderr=log, start_new_session=os.name != "nt")
+                self.process = process
+                try:
+                    if self.closed:
+                        raise ProcessingError("El bot se está cerrando.")
+                    await asyncio.wait_for(process.wait(), timeout)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo Luraph superó el tiempo permitido.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0 or not result.is_file():
+                    raise ProcessingError("No pude desvirtualizar el archivo. Comprueba que sea Luraph v14.7–v15; sin cabecera, indica la versión: `.luraph 14.8` con el adjunto.")
+                try:
+                    report = json.loads(Path(str(result) + ".json").read_text(encoding="utf8"))
+                    selected = report.get("selected") or {}
+                    if selected.get("kind") not in ("lifted", "partial"):
+                        raise ValueError("recovery mode")
+                    if result.stat().st_size > 32 * 1024 * 1024:
+                        raise ProcessingError("El resultado supera el límite de 32 MiB.")
+                    data = result.read_bytes()
+                    if not data or hashlib.sha256(data).hexdigest() != selected.get("sha256"):
+                        raise ValueError("output evidence mismatch")
+                except (OSError, ValueError, TypeError, AttributeError):
+                    raise ProcessingError("No pude verificar el resultado del motor Luraph.") from None
+                return PARTIAL_HEADER + data if selected["kind"] == "partial" else data
+
+
 class DeobfBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.engine = Deobfuscator()
+        self.luraph_engine = LuraphDeobfuscator()
+        self.engine_errors = {}
 
     async def setup_hook(self):
-        await self.engine.prepare()
+        for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine)):
+            try:
+                await engine.prepare()
+            except (ProcessingError, OSError) as error:
+                self.engine_errors[name] = str(error)
+        if len(self.engine_errors) == 2:
+            raise ProcessingError("No hay un motor preparado. " + self.engine_errors["luraph"])
 
     async def close(self):
         try:
             await super().close()
         finally:
             await self.engine.close()
+            await self.luraph_engine.close()
 
 
 def create_bot(owner_id):
     cache = ResultCache()
+    luraph_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -189,7 +285,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Prometheus Recover conectado como {bot.user}. Envía .deobf con un archivo .lua o .txt.")
+        print(f"Recover conectado como {bot.user}. Envía .luraph con un archivo .lua, .luau o .txt; .deobf usa Prometheus.")
 
     @bot.command(name="get")
     async def get_raw(ctx, url: str = ""):
@@ -296,17 +392,23 @@ def create_bot(owner_id):
         finally:
             downloadable.close()
 
-    @bot.command(name="deobf")
-    async def deobf(ctx, url: str = ""):
+    async def process_attachment(ctx, url, engine, cache, command, version=""):
         if ctx.author.id != owner_id:
             return
+        if command in bot.engine_errors:
+            await ctx.send(bot.engine_errors[command])
+            return
+        if version and version not in LURAPH_VERSIONS:
+            await ctx.send("Versión no válida: usa 14.7, 14.8, 14.9 o 15.")
+            return
+        extensions = (".lua", ".luau", ".txt") if command == "luraph" else (".lua", ".txt")
         url = url.strip().strip("<>")
         attachments = ctx.message.attachments
         if url and attachments:
             await ctx.send("Usa una URL o adjunta un archivo, no ambos a la vez.")
             return
-        if not url and (len(attachments) != 1 or not attachments[0].filename.lower().endswith((".lua", ".txt"))):
-            await ctx.send("Uso: `.deobf <URL>` o adjunta un único archivo `.lua` o `.txt`.")
+        if not url and (len(attachments) != 1 or not attachments[0].filename.lower().endswith(extensions)):
+            await ctx.send(f"Uso: `.{command} <URL>` o adjunta un único archivo {', '.join(extensions)}.")
             return
         if not url and attachments[0].size > MAX_INPUT:
             await ctx.send("El archivo debe pesar como máximo 2 MiB.")
@@ -356,7 +458,7 @@ def create_bot(owner_id):
                     input_data = await asyncio.wait_for(attachment.read(), timeout=30)
                 if len(input_data) > MAX_INPUT:
                     raise ProcessingError("El archivo debe pesar como máximo 2 MiB.")
-                key = hashlib.sha256(input_data).digest()
+                key = hashlib.sha256(version.encode() + b"\0" + input_data).digest()
                 cached = cache.get(key)
                 if cached is not None:
                     # Cache hit: avoid creating a temp directory and writing the result to disk.
@@ -365,7 +467,10 @@ def create_bot(owner_id):
                     with tempfile.TemporaryDirectory(prefix="deobf-") as folder:
                         source = Path(folder) / "entrada.lua"
                         source.write_bytes(input_data)
-                        result_data = await bot.engine.run(source)
+                        if command == "luraph":
+                            result_data = await engine.run(source, engine=version)
+                        else:
+                            result_data = await engine.run(source)
                     if len(result_data) <= cache.max_bytes:
                         cache.put(key, result_data)
                 upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
@@ -375,6 +480,8 @@ def create_bot(owner_id):
                 await asyncio.gather(progress, return_exceptions=True)
                 elapsed = time.perf_counter() - started
                 detail = " (desde caché)" if cached is not None else ""
+                if command == "luraph" and result_data.startswith(PARTIAL_HEADER):
+                    detail += " — recuperación parcial: algunos bloques no pudieron recuperarse"
                 downloadable = discord.File(io.BytesIO(result_data), filename="resultado.lua")
                 try:
                     await ctx.send(
@@ -394,6 +501,16 @@ def create_bot(owner_id):
             finally:
                 progress.cancel()
                 await asyncio.gather(progress, return_exceptions=True)
+
+    @bot.command(name="deobf")
+    async def deobf(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.engine, cache, "deobf")
+
+    @bot.command(name="luraph")
+    async def luraph(ctx, url: str = "", version: str = ""):
+        if url in LURAPH_VERSIONS and not version:
+            version, url = url, ""
+        await process_attachment(ctx, url, bot.luraph_engine, luraph_cache, "luraph", version)
 
     return bot
 
@@ -446,8 +563,6 @@ async def main():
     owner = os.environ.get("DISCORD_OWNER_ID", "")
     if not token or not owner.isdecimal():
         raise RuntimeError("Configura DISCORD_TOKEN y DISCORD_OWNER_ID como variables de entorno.")
-    if not (DEOBF_DIR / "bin" / "recover.js").is_file():
-        raise RuntimeError("No se encuentra la herramienta. Revisa DEOBF_RECOVER_DIR.")
     bot = create_bot(int(owner))
     runner = await start_health_server(bot)
     try:
