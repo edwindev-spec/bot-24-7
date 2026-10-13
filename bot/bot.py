@@ -440,17 +440,120 @@ class IronbrewDeobfuscator:
         await self._stop()
 
 
+class ChaoticEvilDeobfuscator:
+    """Run the authorized LuaObfuscatorChaoticEvil parser in static-only mode."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "lb-engine" / "deobfuscator.py"
+        self.script = Path(os.environ.get("LB_DEOBF_PATH", str(default))).resolve()
+        self.python = sys.executable
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {"PATH": os.defpath, "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"}
+
+    async def prepare(self):
+        if not self.script.is_file():
+            raise ProcessingError("No encuentro el motor `.lb`. Reconstruye y despliega la imagen Docker.")
+        process = await asyncio.create_subprocess_exec(
+            self.python, str(self.script), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, env=self.environment,
+            start_new_session=os.name != "nt")
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+            if process.returncode or b"Usage: python deobfuscator.py" not in output:
+                raise ProcessingError("No pude iniciar el motor `.lb` estático.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("El motor `.lb` no respondió al iniciar.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(process.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await killer.wait()
+        await process.wait()
+
+    async def run(self, source, timeout=60):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            result = source.parent / "resultado.lua"
+            try:
+                result.unlink()
+            except FileNotFoundError:
+                pass
+
+            def limit_child_resources():
+                import resource
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 2))
+                resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+                memory_limit = 768 * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    self.python, str(self.script), str(source.resolve()), str(result.resolve()),
+                    cwd=str(source.parent), env=self.environment, stdout=log, stderr=log,
+                    start_new_session=os.name != "nt",
+                    preexec_fn=limit_child_resources if os.name != "nt" else None,
+                )
+                self.process = process
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout + 3)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo `.lb` superó el tiempo permitido.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0:
+                    raise ProcessingError("El motor `.lb` no pudo procesar este archivo Lua.")
+                if not result.is_file() or result.stat().st_size == 0:
+                    raise ProcessingError("El motor `.lb` no produjo una salida para este archivo.")
+                if result.stat().st_size > 32 * 1024 * 1024:
+                    raise ProcessingError("El resultado `.lb` supera el límite de 32 MiB.")
+                return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class DeobfBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.engine = Deobfuscator()
         self.luraph_engine = LuraphDeobfuscator()
         self.ironbrew_engine = IronbrewDeobfuscator()
+        self.lb_engine = ChaoticEvilDeobfuscator()
         self.engine_errors = {}
 
     async def setup_hook(self):
         for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
-                             ("ironbrew", self.ironbrew_engine)):
+                             ("ironbrew", self.ironbrew_engine), ("lb", self.lb_engine)):
             try:
                 await engine.prepare()
             except (ProcessingError, OSError) as error:
@@ -465,6 +568,7 @@ class DeobfBot(commands.Bot):
             await self.engine.close()
             await self.luraph_engine.close()
             await self.ironbrew_engine.close()
+            await self.lb_engine.close()
 
 
 def create_bot(owner_id):
@@ -479,6 +583,7 @@ def create_bot(owner_id):
             store = None
     luraph_cache = ResultCache(store=store)
     ironbrew_cache = ResultCache()
+    lb_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -487,7 +592,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph e .ironbrew.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew y .lb.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -497,10 +602,11 @@ def create_bot(owner_id):
             "`.help` — Muestra esta lista.\n"
             "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB).\n"
             "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
+            "`.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación estática para LuaObfuscator Chaotic Evil; best-effort, sin ejecutar el script.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf`, `.luraph` y `.ironbrew` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew` y `.lb` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -737,6 +843,10 @@ def create_bot(owner_id):
     @bot.command(name="ironbrew")
     async def ironbrew(ctx, url: str = ""):
         await process_attachment(ctx, url, bot.ironbrew_engine, ironbrew_cache, "ironbrew")
+
+    @bot.command(name="lb")
+    async def lb(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.lb_engine, lb_cache, "lb")
 
     return bot
 

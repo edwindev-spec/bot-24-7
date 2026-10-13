@@ -41,6 +41,7 @@ COPY prepare_engine.py ./prepare_engine.py
 COPY luraph-fusion /app/luraph-fusion
 RUN python3 /app/prepare_engine.py --skip-dependencies --jobs 2
 COPY result_cache.py ./result_cache.py
+COPY lb-engine ./lb-engine
 COPY bot.py ./bot.py
 EXPOSE 8080
 CMD ["python", "/app/bot.py"]

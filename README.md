@@ -18,7 +18,7 @@ En Render, crea un Web Service desde el repositorio, usa `bot` como Root Directo
 ### Variables obligatorias
 
 - `DISCORD_TOKEN`: token del bot de Discord. Guárdalo solo como secreto del proveedor; nunca lo subas a GitHub ni lo pongas en la web.
-- `DISCORD_OWNER_ID`: tu ID numérico de usuario de Discord. `.get`, `.deobf`, `.luraph` y `.ironbrew` solo responden a ese ID.
+- `DISCORD_OWNER_ID`: tu ID numérico de usuario de Discord. `.get`, `.deobf`, `.luraph`, `.ironbrew` y `.lb` solo responden a ese ID.
 - `PORT`: lo establece automáticamente el proveedor; localmente el bot usa `8080`.
 
 Activa **Message Content Intent** en Discord Developer Portal. Invita el bot al servidor con permisos para ver mensajes, leer el contenido y enviar mensajes/archivos.
@@ -39,10 +39,11 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 
 - `.deobf`: conserva el motor Prometheus ya integrado; acepta adjunto `.lua`/`.txt` o URL directa.
 - `.ironbrew <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): devuelve bytecode Lua 5.1 como `resultado.luac`.
+- `.lb <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): prueba recuperación **estática** para LuaObfuscator Chaotic Evil; devuelve Lua de texto. No ejecuta el script y los resultados son best-effort.
 - `.luraph`: procesa adjuntos `.lua`, `.luau` o `.txt` (hasta 2 MiB) para Luraph v14.7–v15. Si no detecta la versión, indica una con el adjunto, por ejemplo `.luraph 14.8`.
 - `.get <URL>`: descarga contenido HTTP(S) público como `raw.txt` (máx. 2 MiB), validando hasta cinco redirecciones.
 
-`.get`, `.deobf`, `.luraph` y `.ironbrew` solo responden al `DISCORD_OWNER_ID` configurado.
+`.get`, `.deobf`, `.luraph`, `.ironbrew` y `.lb` solo responden al `DISCORD_OWNER_ID` configurado.
 
 Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render. El motor Luraph va incluido como fuente licenciada y sus herramientas se compilan durante la construcción; reiniciar un contenedor antiguo no incorpora esta actualización.
 
@@ -56,5 +57,6 @@ El bot conserva hasta 256 resultados verificados (máximo 128 MiB) en SQLite. La
 - La ruta `/health` revela únicamente estado de conexión, nombre de cuenta del bot y tiempo de proceso; no devuelve secretos.
 - El motor Prometheus se obtiene del commit fijado `98e1d89faeddbe8d478a9b72df58d13d43a2b765`; el motor Luraph Fusion incluido se fija en `0d2becf3eb4122784b187214a20397703b5a634f` y mantiene sus avisos/licencias de terceros.
 - Ironbrew Deobfuscator se compila desde `Lethal-Luka/IronbrewDeobfuscator` en el commit fijado `43dfbd8fcff52c1f0b9d1ad32ae45142c03683d4`, bajo GPL-3.0; su licencia se incluye en la imagen Docker.
+- `.lb` integra `lovesyko/LuaObfuscatorChaoticEvilDeobfuscator` desde `7a3a80ce5ee1f9909bcdf85148b82d1a4c03208d`, con permiso del usuario confirmado en esta conversación. El upstream no declara licencia; la copia vendorizada elimina la ejecución dinámica/Lupa y corre solo análisis estático, aislado con límites de recursos. Ver `bot/lb-engine/NOTICE.md`.
 - La caché de resultados se limita a 128 MiB y 256 entradas; su persistencia depende de que el proveedor tenga un volumen montado en la ruta configurada.
 - Vercel aloja la web, pero el bot solo estará 24/7 mientras el proveedor del servicio de bot mantenga la instancia encendida.
