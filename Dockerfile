@@ -3,12 +3,17 @@ FROM node:22-bookworm-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEOBF_RECOVER_DIR=/app/prometheus-recover \
+    LURAPH_RECOVER_DIR=/app/luraph-fusion \
     PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv git lua5.1 ca-certificates \
+    python3 python3-venv git lua5.1 ca-certificates cmake build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv
+
+# StyLua conserva el formato legible de las recuperaciones Prometheus.
+RUN npm install --global @johnnymorganz/stylua-bin \
+    && stylua --version
 
 WORKDIR /app
 COPY bot/requirements.txt ./requirements.txt
@@ -21,7 +26,7 @@ RUN git init /app/prometheus-recover \
     && git -C /app/prometheus-recover checkout --detach FETCH_HEAD
 
 COPY bot/prepare_engine.py ./prepare_engine.py
-RUN python3 /app/prepare_engine.py
+RUN python3 /app/prepare_engine.py --skip-dependencies --jobs 2
 COPY bot/bot.py ./bot.py
 
 EXPOSE 8080

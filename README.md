@@ -1,4 +1,4 @@
-# Prometheus Recover — web en Vercel + bot 24/7
+# Luraph y Prometheus Recover — web en Vercel + bot 24/7
 
 Este proyecto separa la web estática (Vercel) del bot de Discord (servicio persistente). Vercel no mantiene una conexión Discord Gateway abierta de forma permanente, así que no despliegues el proceso del bot como una función de Vercel.
 
@@ -6,7 +6,7 @@ Este proyecto separa la web estática (Vercel) del bot de Discord (servicio pers
 
 Recomendado: Railway con Docker. También puedes desplegar la misma carpeta Docker en Render u otro proveedor de servicios persistentes.
 
-1. Sube este proyecto a un repositorio privado de GitHub.
+1. Conecta el repositorio de GitHub.
 2. En Railway crea un proyecto desde ese repositorio.
 3. Deja **Root Directory** vacío (la raíz del repositorio). El `Dockerfile` y `railway.toml` de la raíz configuran automáticamente el servicio; no uses el builder Railpack.
 4. Añade las variables de entorno `DISCORD_TOKEN` y `DISCORD_OWNER_ID`.
@@ -35,12 +35,14 @@ La web guarda la URL en el navegador local, no en el servidor. El token de Disco
 
 ## 3. Usar el bot
 
-Envía `.deobf` con un único archivo `.lua` o `.txt` de hasta 2 MiB para recuperar el código. También puedes usar `.get <URL>` para descargar el contenido de una URL pública HTTP(S) y recibirlo como `raw.txt` (máximo 2 MiB). `.get` sigue hasta cinco redirecciones y valida cada destino; no puede descargar direcciones privadas ni páginas protegidas que no entreguen el contenido directamente. Ambos comandos solo responden al `DISCORD_OWNER_ID` configurado.
+Envía `.luraph` con un único adjunto `.lua`, `.luau` o `.txt` de hasta 2 MiB para procesar Luraph v14.7–v15. Si el archivo no tiene cabecera, indica la versión, por ejemplo `.luraph 14.8` junto con el adjunto. El primer uso puede preparar el motor durante varios minutos. `.deobf` conserva el procesamiento Prometheus para adjuntos `.lua` o `.txt`; `.get <URL>` descarga contenido HTTP(S) público y lo devuelve como `raw.txt` (máximo 2 MiB), siguiendo hasta cinco redirecciones y validando cada destino. Los comandos de procesamiento solo responden al `DISCORD_OWNER_ID` configurado.
+
+Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render; reiniciar un contenedor antiguo no instala el motor Luraph.
 
 ## Seguridad y funcionamiento
 
 - No compartas el token del bot. Si ya se publicó por error, regénéralo en Discord Developer Portal.
 - La ruta `/health` revela únicamente estado de conexión, nombre de cuenta del bot y tiempo de proceso; no devuelve secretos.
-- El motor se obtiene del commit fijado `98e1d89faeddbe8d478a9b72df58d13d43a2b765` de `edwin-dev67/coderabit`, igual que en tu notebook.
+- El motor Prometheus se obtiene del commit fijado `98e1d89faeddbe8d478a9b72df58d13d43a2b765`; el motor Luraph Fusion se fija en `abf3d61fbcd4025e2423fda47f19dc491d13cc2e`.
 - La caché de resultados y las carpetas temporales viven en memoria/disco efímero del proceso; no se guardan entre reinicios.
 - Vercel aloja la web, pero el bot solo estará 24/7 mientras el proveedor del servicio de bot mantenga la instancia encendida.

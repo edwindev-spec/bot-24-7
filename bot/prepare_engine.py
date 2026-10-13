@@ -12,8 +12,15 @@ ENGINE_REPOSITORY = "https://github.com/EdwinVM-luraph/luraph.git"
 
 def luraph_directory():
     here = Path(__file__).resolve().parent
-    default = here if (here / "luraph" / "cli.py").is_file() else here / "luraph-fusion"
-    return Path(os.environ.get("LURAPH_RECOVER_DIR", str(default))).resolve()
+    configured = os.environ.get("LURAPH_RECOVER_DIR")
+    if configured:
+        directory = Path(configured).expanduser()
+        return (directory if directory.is_absolute() else here / directory).resolve()
+    for candidate in (here, here / "luraph-fusion", here / "luraph",
+                      Path.cwd(), Path.cwd() / "luraph-fusion", Path.cwd() / "luraph"):
+        if (candidate / "luraph" / "cli.py").is_file():
+            return candidate.resolve()
+    return here / "luraph-fusion"
 
 
 PROMETHEUS_OLD_VALIDATION = r"""function validate(code, executable) {
@@ -73,6 +80,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--skip-prometheus", action="store_true")
+    parser.add_argument("--skip-dependencies", action="store_true", help="el bot ya tiene sus dependencias instaladas")
     args = parser.parse_args(argv)
     if args.jobs < 1:
         parser.error("--jobs debe ser positivo")
@@ -83,13 +91,14 @@ def main(argv=None):
             parser.error(f"Falta {command}; instálalo antes de preparar el motor.")
     repo = luraph_directory()
     if not (repo / "luraph" / "cli.py").is_file():
-        if repo.exists():
+        if repo.exists() and (not repo.is_dir() or any(repo.iterdir())):
             parser.error(f"{repo} existe pero no contiene el motor. Configura LURAPH_RECOVER_DIR.")
         subprocess.run(["git", "clone", "--no-checkout", ENGINE_REPOSITORY, str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "checkout", "--detach", ENGINE_REVISION], check=True)
     requirements = Path(__file__).resolve().parent / "requirements-bot.txt"
     dependencies = ["-r", str(requirements)] if requirements.is_file() else ["discord.py>=2.4,<3", "aiohttp>=3.10,<4"]
-    subprocess.run([sys.executable, "-m", "pip", "install", *dependencies], check=True)
+    if not args.skip_dependencies:
+        subprocess.run([sys.executable, "-m", "pip", "install", *dependencies], check=True)
     subprocess.run([sys.executable, str(repo / "scripts" / "build_runtime.py"), "--jobs", str(args.jobs)], check=True)
     prometheus = Path(os.environ.get("DEOBF_RECOVER_DIR", str(Path(__file__).resolve().parent / "prometheus-recover"))).resolve()
     if not args.skip_prometheus and (prometheus / "src" / "validate.js").is_file():
