@@ -15,6 +15,8 @@ No ejecutes el bot como una Vercel Function: necesita una conexión continua con
 
 En errores de API, `.get` distingue `401` (autenticación), `403` (acceso bloqueado), `429` (límite, incluyendo `Retry-After`) y `204` (sin contenido). No intenta omitir controles de acceso del servidor.
 
+Ante errores transitorios de conexión y respuestas `429`/`5xx`, realiza hasta tres intentos totales y respeta `Retry-After` si es de 5 segundos o menos; nunca reintenta `403` ni rota cabeceras para evitar bloqueos.
+
 Tras cambiar archivos o añadir el motor, reconstruye y despliega la imagen Docker; reiniciar un contenedor anterior no incorpora la actualización. El motor Luraph se incluye con su licencia y se compila durante el build. Ironbrew se obtiene en un commit fijado y se compila como .NET 8 en la etapa Docker; la imagen incluye su licencia GPL-3.0. `.lb` se distribuye con permiso confirmado por el usuario; el upstream no declara licencia y el modo instalado es estático, sin Lupa. `.iv` se incluye bajo MIT; se deshabilitó el helper upstream basado en `eval`. Ambos procesos tienen timeout y límites de recursos.
 
 La caché de disco conserva únicamente resultados recuperados verificados (hasta 128 MiB y 256 entradas), no los archivos de entrada. El valor predeterminado `/app/cache` puede ser efímero. Para persistirla, monta un volumen del hosting en `/data` y configura `LURAPH_CACHE_DIR=/data/luraph-cache`; para desactivar la caché de disco, deja la variable vacía. Requiere configurar en el hosting las variables Discord habituales.

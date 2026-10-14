@@ -44,6 +44,7 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 - `.luraph`: procesa adjuntos `.lua`, `.luau` o `.txt` (hasta 2 MiB) para Luraph v14.7–v15. Si no detecta la versión, indica una con el adjunto, por ejemplo `.luraph 14.8`.
 - `.get <URL>`: hace GET a URLs y APIs HTTP(S) públicas (máx. 2 MiB); devuelve JSON válido formateado en `raw.json` —con vista previa si es pequeño— y otros datos como `raw.txt`. Valida los IP de DNS y cada destino de hasta cinco redirecciones, bloquea redes privadas y evita downgrades HTTPS.
 - Ante respuestas `401`, `403`, `429` o `204`, `.get` explica autenticación, acceso bloqueado, límite de solicitudes o ausencia de contenido; también muestra detalles JSON de otros errores cuando están disponibles.
+- Reintenta como máximo tres intentos totales ante errores transitorios de conexión y respuestas `429`/`5xx`, respetando `Retry-After` hasta 5 s. No reintenta `403` ni cambia cabeceras para eludir bloqueos.
 
 `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb` y `.iv` solo responden al `DISCORD_OWNER_ID` configurado.
 

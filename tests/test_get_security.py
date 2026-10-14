@@ -3,6 +3,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import aiohttp
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot"))
 from bot import PublicOnlyResolver, validate_public_http_url
 
@@ -119,7 +121,10 @@ class FakeSession:
 
     def get(self, url, **_kwargs):
         self.requested.append(url)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -223,9 +228,10 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_403_explains_that_api_owner_must_allow_access(self):
         response = FakeResponse(status=403, headers={"Content-Type": "text/html"}, length=7, chunks=(b"Blocked",))
-        ctx, _session = await self.run_get("https://api.example.com/private", [response])
+        ctx, session = await self.run_get("https://api.example.com/private", [response])
         self.assertIn("HTTP 403", ctx.sent[-1][0])
         self.assertIn("no puede saltarse ese control", ctx.sent[-1][0])
+        self.assertEqual(len(session.requested), 1, "403 must not trigger retries")
 
     async def test_401_explains_public_get_has_no_auth_token(self):
         response = FakeResponse(status=401, headers={"Content-Type": "application/json"}, length=24,
@@ -236,9 +242,37 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_429_reports_retry_after(self):
         response = FakeResponse(status=429, headers={"Retry-After": "30"}, length=0, chunks=())
-        ctx, _session = await self.run_get("https://api.example.com/limited", [response])
+        ctx, session = await self.run_get("https://api.example.com/limited", [response])
         self.assertIn("HTTP 429", ctx.sent[-1][0])
         self.assertIn("30", ctx.sent[-1][0])
+        self.assertEqual(len(session.requested), 1, "long Retry-After must not be shortened")
+
+    async def test_503_retries_then_succeeds(self):
+        error = FakeResponse(status=503, headers={"Retry-After": "0"}, length=0, chunks=())
+        body = b'{"ok":true}'
+        success = FakeResponse(status=200, length=len(body), chunks=(body,))
+        ctx, session = await self.run_get("https://api.example.com/data", [error, success])
+        self.assertEqual(len(session.requested), 2)
+        self.assertEqual(ctx.sent[-1][1]["file"].filename, "raw.json")
+
+    async def test_connection_failure_retries_then_succeeds(self):
+        body = b"available"
+        success = FakeResponse(status=200, length=len(body), chunks=(body,))
+        ctx, session = await self.run_get(
+            "https://api.example.com/data",
+            [aiohttp.ClientConnectionError("temporary"), success],
+        )
+        self.assertEqual(len(session.requested), 2)
+        self.assertEqual(ctx.sent[-1][1]["file"].filename, "raw.txt")
+
+    async def test_429_short_retry_after_uses_bounded_attempts(self):
+        responses = [
+            FakeResponse(status=429, headers={"Retry-After": "0"}, length=0, chunks=())
+            for _ in range(3)
+        ]
+        ctx, session = await self.run_get("https://api.example.com/limited", responses)
+        self.assertEqual(len(session.requested), 3)
+        self.assertIn("No se volverá a intentar", ctx.sent[-1][0])
 
     async def test_204_reports_no_content(self):
         response = FakeResponse(status=204, length=0, chunks=())

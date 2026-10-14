@@ -12,6 +12,8 @@ import os
 import tempfile
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -45,6 +47,27 @@ PARTIAL_HEADER = b"-- Recuperacion parcial: algunos bloques no pudieron recupera
 LURAPH_VERSIONS = ("14.7", "14.8", "14.9", "15")
 MAX_INPUT = 2 * 1024 * 1024
 BUSY = asyncio.Lock()
+MAX_FETCH_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+MAX_AUTOMATIC_RETRY_WAIT = 5.0
+
+
+def retry_wait_seconds(retry_after, attempt):
+    """Return a bounded Retry-After/backoff delay, or None if server asks us to wait longer."""
+    if retry_after:
+        try:
+            delay = max(0.0, float(retry_after))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                delay = None
+        if delay is not None:
+            return delay if delay <= MAX_AUTOMATIC_RETRY_WAIT else None
+    return min(0.5 * (2 ** attempt), 2.0)
 
 
 def validate_public_http_url(url, require_https=False):
@@ -806,13 +829,15 @@ def create_bot(owner_id):
             await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
             return
 
-        timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
+        timeout = aiohttp.ClientTimeout(total=12, connect=8, sock_read=10)
         request_headers = {
             "User-Agent": "PrometheusRecoverBot/1.0 (+Discord URL fetcher)",
             "Accept": "application/json, application/problem+json, text/plain;q=0.9, application/octet-stream;q=0.8, text/html;q=0.5, */*;q=0.2",
         }
         current_url = url
         https_required = parsed.scheme == "https"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 35
         try:
             connector = aiohttp.TCPConnector(
                 resolver=PublicOnlyResolver(), use_dns_cache=True, ttl_dns_cache=60,
@@ -821,7 +846,7 @@ def create_bot(owner_id):
                 timeout=timeout, trust_env=False, headers=request_headers,
                 connector=connector, cookie_jar=aiohttp.DummyCookieJar(),
             ) as session:
-                # Follow a small number of redirects manually so each destination is validated.
+                # Follow redirects manually; retry only transient failures, never HTTP 403.
                 for _ in range(6):
                     try:
                         parsed = validate_public_http_url(current_url, require_https=https_required)
@@ -830,66 +855,104 @@ def create_bot(owner_id):
                         return
                     https_required = https_required or parsed.scheme == "https"
 
-                    async with session.get(current_url, allow_redirects=False) as response:
-                        if response.status in (301, 302, 303, 307, 308):
-                            location = response.headers.get("Location")
-                            if not location:
-                                await ctx.send("El servidor devolvió una redirección sin destino.")
-                                return
-                            current_url = urljoin(current_url, location)
+                    redirected = False
+                    for attempt in range(MAX_FETCH_ATTEMPTS):
+                        remaining = deadline - loop.time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        attempt_timeout = aiohttp.ClientTimeout(
+                            total=min(12, remaining), connect=min(8, remaining),
+                            sock_read=min(10, remaining),
+                        )
+                        retry_delay = None
+                        try:
+                            async with session.get(
+                                current_url, allow_redirects=False, timeout=attempt_timeout,
+                            ) as response:
+                                if response.status in RETRYABLE_HTTP_STATUSES and attempt < MAX_FETCH_ATTEMPTS - 1:
+                                    retry_delay = retry_wait_seconds(
+                                        response.headers.get("Retry-After"), attempt,
+                                    )
+                                    if retry_delay is not None and loop.time() + retry_delay < deadline:
+                                        # Do not read an arbitrary retry body; closing it releases the socket safely.
+                                        pass
+                                    else:
+                                        retry_delay = None
+                                if retry_delay is None:
+                                    if response.status in (301, 302, 303, 307, 308):
+                                        location = response.headers.get("Location")
+                                        if not location:
+                                            await ctx.send("El servidor devolvió una redirección sin destino.")
+                                            return
+                                        current_url = urljoin(current_url, location)
+                                        redirected = True
+                                    elif response.status == 204:
+                                        await ctx.send("La API respondió HTTP 204 No Content; la solicitud fue correcta, pero no hay contenido para descargar.")
+                                        return
+                                    elif not 200 <= response.status < 300:
+                                        error_body = await response.content.read(512)
+                                        detail = None
+                                        try:
+                                            error_json = json.loads(error_body)
+                                            if isinstance(error_json, dict):
+                                                for key in ("message", "detail", "error_description", "error", "title"):
+                                                    candidate = error_json.get(key)
+                                                    if isinstance(candidate, str) and candidate.strip():
+                                                        detail = " ".join(candidate.split())[:160]
+                                                        break
+                                        except (ValueError, TypeError, RecursionError):
+                                            pass
+                                        if response.status == 401:
+                                            message = "HTTP 401: la API requiere autenticación; `.get` solo envía solicitudes GET públicas y no añade tokens."
+                                        elif response.status == 403:
+                                            message = "HTTP 403: el servidor bloqueó o no autorizó la solicitud. `.get` no puede saltarse ese control; el dueño de la API debe permitir el acceso desde el bot o indicar un método oficial."
+                                        elif response.status == 429:
+                                            retry_after = response.headers.get("Retry-After")
+                                            suffix = f" Reintenta después de: {retry_after[:80]}." if retry_after else ""
+                                            message = f"HTTP 429: la API limitó las solicitudes.{suffix} No se volverá a intentar automáticamente."
+                                        else:
+                                            retry_after = response.headers.get("Retry-After")
+                                            suffix = f" El servidor indica reintentar después de: {retry_after[:80]}." if retry_after else ""
+                                            message = f"La URL respondió con HTTP {response.status}; no se creó el archivo.{suffix}"
+                                        if detail and response.status not in (401, 403, 429):
+                                            safe_detail = discord.utils.escape_markdown(detail)
+                                            message += f" Detalle de la API: {safe_detail}"
+                                        await ctx.send(message)
+                                        return
+                                    else:
+                                        if response.content_length is not None and response.content_length > MAX_INPUT:
+                                            await ctx.send("El contenido supera el límite de 2 MiB.")
+                                            return
+                                        chunks = []
+                                        total = 0
+                                        async for chunk in response.content.iter_chunked(64 * 1024):
+                                            total += len(chunk)
+                                            if total > MAX_INPUT:
+                                                await ctx.send("El contenido supera el límite de 2 MiB.")
+                                                return
+                                            chunks.append(chunk)
+                                        raw_data = b"".join(chunks)
+                        except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                            if attempt >= MAX_FETCH_ATTEMPTS - 1:
+                                raise
+                            retry_delay = min(0.5 * (2 ** attempt), 2.0)
+                            if loop.time() + retry_delay >= deadline:
+                                raise asyncio.TimeoutError
+                        if retry_delay is not None:
+                            await asyncio.sleep(retry_delay)
                             continue
-                        if response.status == 204:
-                            await ctx.send("La API respondió HTTP 204 No Content; la solicitud fue correcta, pero no hay contenido para descargar.")
-                            return
-                        if not 200 <= response.status < 300:
-                            error_body = await response.content.read(512)
-                            detail = None
-                            try:
-                                error_json = json.loads(error_body)
-                                if isinstance(error_json, dict):
-                                    for key in ("message", "detail", "error_description", "error", "title"):
-                                        candidate = error_json.get(key)
-                                        if isinstance(candidate, str) and candidate.strip():
-                                            detail = " ".join(candidate.split())[:160]
-                                            break
-                            except (ValueError, TypeError, RecursionError):
-                                pass
-                            if response.status == 401:
-                                message = "HTTP 401: la API requiere autenticación; `.get` solo envía solicitudes GET públicas y no añade tokens."
-                            elif response.status == 403:
-                                message = "HTTP 403: el servidor bloqueó o no autorizó la solicitud. `.get` no puede saltarse ese control; el dueño de la API debe permitir el acceso desde el bot o indicar un método oficial."
-                            elif response.status == 429:
-                                retry_after = response.headers.get("Retry-After")
-                                suffix = f" Reintenta después de: {retry_after[:80]}." if retry_after else ""
-                                message = f"HTTP 429: la API limitó las solicitudes.{suffix}"
-                            else:
-                                message = f"La URL respondió con HTTP {response.status}; no se creó el archivo."
-                            if detail and response.status not in (401, 403, 429):
-                                safe_detail = discord.utils.escape_markdown(detail)
-                                message += f" Detalle de la API: {safe_detail}"
-                            await ctx.send(message)
-                            return
-                        if response.content_length is not None and response.content_length > MAX_INPUT:
-                            await ctx.send("El contenido supera el límite de 2 MiB.")
-                            return
-                        chunks = []
-                        total = 0
-                        async for chunk in response.content.iter_chunked(64 * 1024):
-                            total += len(chunk)
-                            if total > MAX_INPUT:
-                                await ctx.send("El contenido supera el límite de 2 MiB.")
-                                return
-                            chunks.append(chunk)
-                        raw_data = b"".join(chunks)
                         break
+                    if redirected:
+                        continue
+                    break
                 else:
                     await ctx.send("La URL tiene demasiadas redirecciones (máximo 5).")
                     return
         except asyncio.TimeoutError:
-            await ctx.send("La descarga superó el tiempo límite de 25 segundos.")
+            await ctx.send("La descarga superó el tiempo límite total de 35 segundos, incluidos los reintentos.")
             return
         except (aiohttp.ClientError, OSError):
-            await ctx.send("No pude descargar esa URL. Comprueba que sea pública y accesible.")
+            await ctx.send(f"No pude descargar esa URL tras hasta {MAX_FETCH_ATTEMPTS} intentos. Comprueba que sea pública y accesible.")
             return
 
         # Some protected endpoints redirect to an explanatory HTML page instead of returning the script.
