@@ -935,7 +935,41 @@ class MoonVeilDeobfuscator:
                 finally:
                     await self._stop()
                 if process.returncode != 0:
-                    raise ProcessingError("MoonVeil no pudo recuperar este archivo; comprueba que sea compatible con V1.4.5.")
+                    log.seek(0, os.SEEK_END)
+                    log_size = log.tell()
+                    log.seek(max(0, log_size - 8192))
+                    diagnostic = log.read(8192).decode("utf-8", errors="replace").lower()
+                    if "no base64 payload found" in diagnostic:
+                        message = (
+                            "`.mv` no encontró el payload Base64 esperado. El archivo puede usar otro "
+                            "formato de empaquetado o no ser una muestra MoonVeil V1.4.5 compatible."
+                        )
+                        reason = "payload_not_found"
+                    elif "luraph v14.x loader detected" in diagnostic:
+                        message = "El archivo parece protegido con Luraph, no MoonVeil; prueba `.luraph`."
+                        reason = "luraph_detected"
+                    elif "incomplete vm spec" in diagnostic:
+                        message = (
+                            "MoonVeil detectó una VM, pero el perfil V1.4.5 no pudo completar sus datos. "
+                            "Puede ser otra versión o una variante no compatible."
+                        )
+                        reason = "incomplete_vm_profile"
+                    elif "unknown payload transform" in diagnostic or "zstandard" in diagnostic or "zstd" in diagnostic:
+                        message = "`.mv` reconoció un empaquetado que no pudo descomprimir; puede ser una variante no compatible."
+                        reason = "payload_decode_failed"
+                    elif "memoryerror" in diagnostic:
+                        message = "`.mv` agotó el límite de memoria procesando el archivo."
+                        reason = "memory_limit"
+                    else:
+                        message = (
+                            f"MoonVeil terminó con error (código {process.returncode}). "
+                            "El formato puede no ser compatible con V1.4.5 o el analizador encontró un caso no soportado."
+                        )
+                        reason = "analyzer_error"
+                    logging.getLogger("bot.mv").warning(
+                        "mv_failed returncode=%s reason=%s", process.returncode, reason,
+                    )
+                    raise ProcessingError(message)
                 if not result.is_file() or result.stat().st_size == 0:
                     raise ProcessingError("MoonVeil no produjo una salida para este archivo.")
                 if result.stat().st_size > 32 * 1024 * 1024:

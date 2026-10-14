@@ -39,8 +39,9 @@ class MoonVeilCommandTests(unittest.IsolatedAsyncioTestCase):
                     'os.execute("touch ' + str(marker) + '")\nreturn 1\n',
                     encoding="utf-8",
                 )
-                with self.assertRaises(ProcessingError):
+                with self.assertRaises(ProcessingError) as caught:
                     await engine.run(source, timeout=20)
+                self.assertIn("no encontró el payload Base64", str(caught.exception))
             self.assertFalse(marker.exists(), "MoonVeil mode must not execute the supplied Lua source")
         finally:
             await engine.close()
