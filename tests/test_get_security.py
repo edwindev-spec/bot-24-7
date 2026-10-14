@@ -85,6 +85,11 @@ class FakeContent:
         for chunk in self.chunks:
             yield chunk
 
+    async def read(self, size=-1):
+        self.read_started = True
+        data = b"".join(self.chunks)
+        return data if size < 0 else data[:size]
+
 
 class FakeResponse:
     def __init__(self, status=200, headers=None, length=3, chunks=(b"abc",)):
@@ -215,6 +220,39 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
         ctx, _session = await self.run_get("https://example.com/large", [response])
         self.assertFalse(response.content.read_started)
         self.assertIn("supera el límite", ctx.sent[-1][0])
+
+    async def test_403_explains_that_api_owner_must_allow_access(self):
+        response = FakeResponse(status=403, headers={"Content-Type": "text/html"}, length=7, chunks=(b"Blocked",))
+        ctx, _session = await self.run_get("https://api.example.com/private", [response])
+        self.assertIn("HTTP 403", ctx.sent[-1][0])
+        self.assertIn("no puede saltarse ese control", ctx.sent[-1][0])
+
+    async def test_401_explains_public_get_has_no_auth_token(self):
+        response = FakeResponse(status=401, headers={"Content-Type": "application/json"}, length=24,
+                                chunks=(b'{"message":"Need token"}',))
+        ctx, _session = await self.run_get("https://api.example.com/private", [response])
+        self.assertIn("requiere autenticación", ctx.sent[-1][0])
+        self.assertIn("no añade tokens", ctx.sent[-1][0])
+
+    async def test_429_reports_retry_after(self):
+        response = FakeResponse(status=429, headers={"Retry-After": "30"}, length=0, chunks=())
+        ctx, _session = await self.run_get("https://api.example.com/limited", [response])
+        self.assertIn("HTTP 429", ctx.sent[-1][0])
+        self.assertIn("30", ctx.sent[-1][0])
+
+    async def test_204_reports_no_content(self):
+        response = FakeResponse(status=204, length=0, chunks=())
+        ctx, _session = await self.run_get("https://api.example.com/empty", [response])
+        self.assertIn("204 No Content", ctx.sent[-1][0])
+
+    async def test_json_error_detail_is_markdown_escaped(self):
+        body = b'{"detail":"bad `input`"}'
+        response = FakeResponse(status=400, headers={"Content-Type": "application/problem+json"},
+                                length=len(body), chunks=(body,))
+        ctx, _session = await self.run_get("https://api.example.com/bad-request", [response])
+        self.assertIn("Detalle de la API", ctx.sent[-1][0])
+        self.assertIn("bad", ctx.sent[-1][0])
+        self.assertIn("\\`", ctx.sent[-1][0])
 
 
 if __name__ == "__main__":

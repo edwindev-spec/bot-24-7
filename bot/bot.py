@@ -838,8 +838,36 @@ def create_bot(owner_id):
                                 return
                             current_url = urljoin(current_url, location)
                             continue
-                        if response.status != 200:
-                            await ctx.send(f"La URL respondió con HTTP {response.status}; no se creó el archivo.")
+                        if response.status == 204:
+                            await ctx.send("La API respondió HTTP 204 No Content; la solicitud fue correcta, pero no hay contenido para descargar.")
+                            return
+                        if not 200 <= response.status < 300:
+                            error_body = await response.content.read(512)
+                            detail = None
+                            try:
+                                error_json = json.loads(error_body)
+                                if isinstance(error_json, dict):
+                                    for key in ("message", "detail", "error_description", "error", "title"):
+                                        candidate = error_json.get(key)
+                                        if isinstance(candidate, str) and candidate.strip():
+                                            detail = " ".join(candidate.split())[:160]
+                                            break
+                            except (ValueError, TypeError, RecursionError):
+                                pass
+                            if response.status == 401:
+                                message = "HTTP 401: la API requiere autenticación; `.get` solo envía solicitudes GET públicas y no añade tokens."
+                            elif response.status == 403:
+                                message = "HTTP 403: el servidor bloqueó o no autorizó la solicitud. `.get` no puede saltarse ese control; el dueño de la API debe permitir el acceso desde el bot o indicar un método oficial."
+                            elif response.status == 429:
+                                retry_after = response.headers.get("Retry-After")
+                                suffix = f" Reintenta después de: {retry_after[:80]}." if retry_after else ""
+                                message = f"HTTP 429: la API limitó las solicitudes.{suffix}"
+                            else:
+                                message = f"La URL respondió con HTTP {response.status}; no se creó el archivo."
+                            if detail and response.status not in (401, 403, 429):
+                                safe_detail = discord.utils.escape_markdown(detail)
+                                message += f" Detalle de la API: {safe_detail}"
+                            await ctx.send(message)
                             return
                         if response.content_length is not None and response.content_length > MAX_INPUT:
                             await ctx.send("El contenido supera el límite de 2 MiB.")
