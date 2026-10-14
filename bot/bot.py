@@ -542,6 +542,118 @@ class ChaoticEvilDeobfuscator:
         await self._stop()
 
 
+class IronveilDeobfuscator:
+    """Run the pinned Ironveil V1 parser; input Lua is parsed, never executed."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "iv-engine" / "deobfuscator" / "index.js"
+        self.script = Path(os.environ.get("IRONVEIL_DEOBF_PATH", str(default))).resolve()
+        self.node = shutil.which("node")
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {
+            "PATH": os.pathsep.join([str(Path(self.node).parent), os.defpath]) if self.node else os.defpath,
+            "LANG": "C.UTF-8",
+        }
+
+    async def prepare(self):
+        if not self.node or not self.script.is_file():
+            raise ProcessingError("No encuentro Node.js o el motor `.iv`. Reconstruye y despliega la imagen Docker.")
+        required = (self.script.parent / "utils" / "parse.js",
+                    self.script.parent / "Beautiful" / "beautifier.js")
+        if any(not path.is_file() for path in required):
+            raise ProcessingError("La instalación del motor `.iv` está incompleta.")
+        process = await asyncio.create_subprocess_exec(
+            self.node, "--version", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, env=self.environment,
+            start_new_session=os.name != "nt")
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+            try:
+                major = int(output.strip().lstrip(b"v").split(b".", 1)[0])
+            except (ValueError, IndexError):
+                major = 0
+            if process.returncode or major < 18:
+                raise ProcessingError("El motor `.iv` requiere Node.js 18 o superior.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("Node.js no respondió al iniciar el motor `.iv`.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(process.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await killer.wait()
+        await process.wait()
+
+    async def run(self, source, timeout=60):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            result = source.parent / "resultado.lua"
+            try:
+                result.unlink()
+            except FileNotFoundError:
+                pass
+
+            def limit_child_resources():
+                import resource
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 2))
+                resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    self.node, "--max-old-space-size=512", str(self.script),
+                    str(source.resolve()), str(result.resolve()),
+                    cwd=str(source.parent), env=self.environment, stdout=log, stderr=log,
+                    start_new_session=os.name != "nt",
+                    preexec_fn=limit_child_resources if os.name != "nt" else None,
+                )
+                self.process = process
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout + 3)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo `.iv` superó el tiempo permitido.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0:
+                    raise ProcessingError("Ironveil no pudo procesar este archivo Lua.")
+                if not result.is_file() or result.stat().st_size == 0:
+                    raise ProcessingError("Ironveil no produjo una salida para este archivo.")
+                if result.stat().st_size > 32 * 1024 * 1024:
+                    raise ProcessingError("El resultado `.iv` supera el límite de 32 MiB.")
+                return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class DeobfBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -549,11 +661,13 @@ class DeobfBot(commands.Bot):
         self.luraph_engine = LuraphDeobfuscator()
         self.ironbrew_engine = IronbrewDeobfuscator()
         self.lb_engine = ChaoticEvilDeobfuscator()
+        self.iv_engine = IronveilDeobfuscator()
         self.engine_errors = {}
 
     async def setup_hook(self):
         for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
-                             ("ironbrew", self.ironbrew_engine), ("lb", self.lb_engine)):
+                             ("ironbrew", self.ironbrew_engine), ("lb", self.lb_engine),
+                             ("iv", self.iv_engine)):
             try:
                 await engine.prepare()
             except (ProcessingError, OSError) as error:
@@ -569,6 +683,7 @@ class DeobfBot(commands.Bot):
             await self.luraph_engine.close()
             await self.ironbrew_engine.close()
             await self.lb_engine.close()
+            await self.iv_engine.close()
 
 
 def create_bot(owner_id):
@@ -584,6 +699,7 @@ def create_bot(owner_id):
     luraph_cache = ResultCache(store=store)
     ironbrew_cache = ResultCache()
     lb_cache = ResultCache()
+    iv_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -592,7 +708,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew y .lb.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .lb e .iv.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -605,8 +721,9 @@ def create_bot(owner_id):
             "`.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación estática para LuaObfuscator Chaotic Evil; best-effort, sin ejecutar el script.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
+            "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew` y `.lb` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb` y `.iv` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -847,6 +964,10 @@ def create_bot(owner_id):
     @bot.command(name="lb")
     async def lb(ctx, url: str = ""):
         await process_attachment(ctx, url, bot.lb_engine, lb_cache, "lb")
+
+    @bot.command(name="iv")
+    async def iv(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.iv_engine, iv_cache, "iv")
 
     return bot
 
