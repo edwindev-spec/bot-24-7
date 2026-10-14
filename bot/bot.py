@@ -781,7 +781,7 @@ def create_bot(owner_id):
         await ctx.send(
             "**Comandos disponibles**\n"
             "`.help` — Muestra esta lista.\n"
-            "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB); valida DNS y cada redirección.\n"
+            "`.get <URL>` — Hace GET a URLs/APIs HTTP(S) públicas (máx. 2 MiB); entrega JSON legible como `raw.json` y texto como `raw.txt`, validando DNS y redirecciones.\n"
             "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
             "`.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación estática para LuaObfuscator Chaotic Evil; best-effort, sin ejecutar el script.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
@@ -809,7 +809,7 @@ def create_bot(owner_id):
         timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
         request_headers = {
             "User-Agent": "PrometheusRecoverBot/1.0 (+Discord URL fetcher)",
-            "Accept": "text/plain, application/json, application/octet-stream, text/html;q=0.8, */*;q=0.5",
+            "Accept": "application/json, application/problem+json, text/plain;q=0.9, application/octet-stream;q=0.8, text/html;q=0.5, */*;q=0.2",
         }
         current_url = url
         https_required = parsed.scheme == "https"
@@ -872,15 +872,46 @@ def create_bot(owner_id):
             await ctx.send("El endpoint redirigió a su página de protección en lugar de devolver el contenido del script. `.get` ya sigue redirecciones públicas, pero el servidor debe permitir el acceso directo al endpoint para obtener el loader.")
             return
 
-        # Save as UTF-8 text even if the source contains malformed byte sequences.
+        # Keep text readable and pretty-print valid JSON API responses.
         text_data = raw_data.decode("utf-8-sig", errors="replace").encode("utf-8")
         upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
-        if len(text_data) > upload_limit:
+        output_data = text_data
+        filename = "raw.txt"
+        json_preview = None
+        json_compact = False
+        try:
+            json_value = json.loads(text_data)
+            pretty_json = (json.dumps(json_value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+            compact_json = json.dumps(json_value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        except (ValueError, TypeError, RecursionError):
+            pretty_json = compact_json = None
+        if pretty_json is not None:
+            filename = "raw.json"
+            if len(pretty_json) <= upload_limit:
+                output_data = pretty_json
+                json_preview = pretty_json.decode("utf-8").rstrip()
+            elif len(compact_json) <= upload_limit:
+                output_data = compact_json
+                json_compact = True
+            else:
+                await ctx.send("La respuesta JSON formateada supera el límite de archivos de este servidor de Discord.")
+                return
+        if len(output_data) > upload_limit:
             await ctx.send("El archivo resultante supera el límite de archivos de este servidor de Discord.")
             return
-        downloadable = discord.File(io.BytesIO(text_data), filename="raw.txt")
+        downloadable = discord.File(io.BytesIO(output_data), filename=filename)
+        if filename == "raw.json":
+            if json_compact:
+                message = f"JSON descargado como `raw.json` ({len(output_data)} bytes); se dejó compacto para respetar el límite de archivos."
+            elif json_preview is not None and len(json_preview) <= 900:
+                safe_preview = json_preview.replace("```", "``\u200b`")
+                message = f"Respuesta JSON formateada ({len(output_data)} bytes):\n```json\n{safe_preview}\n```"
+            else:
+                message = f"Respuesta JSON formateada y descargada como `raw.json` ({len(output_data)} bytes)."
+        else:
+            message = f"Contenido descargado ({len(output_data)} bytes):"
         try:
-            await ctx.send(f"Contenido descargado ({len(text_data)} bytes):", file=downloadable)
+            await ctx.send(message, file=downloadable)
         finally:
             downloadable.close()
 

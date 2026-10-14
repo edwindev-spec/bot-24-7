@@ -42,7 +42,7 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 - `.lb <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): prueba recuperación **estática** para LuaObfuscator Chaotic Evil; devuelve Lua de texto. No ejecuta el script y los resultados son best-effort.
 - `.iv <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): intenta recuperar Ironveil V1 y devuelve Lua de texto en `resultado.lua`.
 - `.luraph`: procesa adjuntos `.lua`, `.luau` o `.txt` (hasta 2 MiB) para Luraph v14.7–v15. Si no detecta la versión, indica una con el adjunto, por ejemplo `.luraph 14.8`.
-- `.get <URL>`: descarga contenido HTTP(S) público como `raw.txt` (máx. 2 MiB); valida los IP de DNS y cada destino de hasta cinco redirecciones, bloquea redes privadas y evita downgrades HTTPS.
+- `.get <URL>`: hace GET a URLs y APIs HTTP(S) públicas (máx. 2 MiB); devuelve JSON válido formateado en `raw.json` —con vista previa si es pequeño— y otros datos como `raw.txt`. Valida los IP de DNS y cada destino de hasta cinco redirecciones, bloquea redes privadas y evita downgrades HTTPS.
 
 `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb` y `.iv` solo responden al `DISCORD_OWNER_ID` configurado.
 

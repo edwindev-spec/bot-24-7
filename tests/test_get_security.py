@@ -104,6 +104,7 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requested = []
+        self.session_kwargs = {}
 
     async def __aenter__(self):
         return self
@@ -117,6 +118,22 @@ class FakeSession:
 
 
 class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_help_describes_api_json_support(self):
+        from types import SimpleNamespace
+        import bot as bot_module
+
+        app = bot_module.create_bot(123)
+        ctx = SimpleNamespace(sent=[])
+
+        async def send(message, **_kwargs):
+            ctx.sent.append(message)
+
+        ctx.send = send
+        await app.get_command("help").callback(ctx)
+        self.assertIn("APIs HTTP(S) públicas", ctx.sent[0])
+        self.assertIn("raw.json", ctx.sent[0])
+        await app.close()
+
     async def run_get(self, url, responses):
         from unittest.mock import patch
         from types import SimpleNamespace
@@ -131,12 +148,21 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def send(message, **kwargs):
+            file = kwargs.get("file")
+            if file is not None:
+                position = file.fp.tell()
+                kwargs["_file_data"] = file.fp.read()
+                file.fp.seek(position)
             ctx.sent.append((message, kwargs))
+
+        def make_session(*_args, **kwargs):
+            session.session_kwargs = kwargs
+            return session
 
         ctx.send = send
         with patch.object(bot_module, "PublicOnlyResolver", return_value=object()), \
              patch.object(bot_module.aiohttp, "TCPConnector", return_value=object()), \
-             patch.object(bot_module.aiohttp, "ClientSession", return_value=session):
+             patch.object(bot_module.aiohttp, "ClientSession", side_effect=make_session):
             await app.get_command("get").callback(ctx, url)
         await app.close()
         return ctx, session
@@ -149,6 +175,20 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
         message, kwargs = ctx.sent[-1]
         self.assertIn("3 bytes", message)
         self.assertEqual(kwargs["file"].filename, "raw.txt")
+
+    async def test_json_api_is_pretty_printed_and_previewed(self):
+        body = b'{"ok":true,"items":[1,2]}'
+        ctx, session = await self.run_get(
+            "https://api.example.com/data",
+            [FakeResponse(length=len(body), chunks=(body,))],
+        )
+        message, kwargs = ctx.sent[-1]
+        self.assertEqual(kwargs["file"].filename, "raw.json")
+        self.assertEqual(kwargs["_file_data"], b'{\n  "ok": true,\n  "items": [\n    1,\n    2\n  ]\n}\n')
+        self.assertIn("```json", message)
+        self.assertIn('"items": [', message)
+        self.assertTrue(session.session_kwargs["headers"]["Accept"].startswith("application/json"))
+        self.assertFalse(session.session_kwargs["trust_env"])
 
     async def test_redirect_to_private_literal_is_blocked_before_request(self):
         ctx, session = await self.run_get(
