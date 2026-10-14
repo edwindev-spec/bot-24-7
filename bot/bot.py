@@ -4,6 +4,8 @@ import hashlib
 import io
 import ipaddress
 import json
+import logging
+import re
 import signal
 import socket
 import sys
@@ -15,7 +17,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import aiohttp
 import discord
@@ -50,6 +52,89 @@ BUSY = asyncio.Lock()
 MAX_FETCH_ATTEMPTS = 3
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 MAX_AUTOMATIC_RETRY_WAIT = 5.0
+HTTP_LOGGER = logging.getLogger("bot.http")
+_LOG_SENSITIVE_NAME = re.compile(
+    r"(?:auth|token|api[-_]?key|access[-_]?key|secret|credential|password|"
+    r"signature|session|jwt|nonce|csrf|bypass)", re.IGNORECASE,
+)
+_LOG_SECRET_PATH_MARKER = re.compile(
+    r"^(?:token|key|secret|auth|session|signature|sig|password|credential)$",
+    re.IGNORECASE,
+)
+_LOG_LONG_TOKEN = re.compile(r"^[A-Za-z0-9._~-]{24,}$")
+_AUDITABLE_HEADER_VALUES = {
+    "accept", "accept-encoding", "cache-control", "content-disposition",
+    "content-encoding", "content-length", "content-type", "date", "origin",
+    "retry-after", "server", "user-agent", "x-correlation-id", "x-request-id",
+    "cf-ray", "x-vercel-id",
+}
+
+
+def _safe_log_text(value, limit=512):
+    text = "".join(char if char.isprintable() else " " for char in str(value))
+    return text[:limit]
+
+
+def redact_url_for_log(url):
+    """Hide query values and token-like path components before writing URLs to logs."""
+    try:
+        parsed = urlsplit(str(url))
+        path_parts = []
+        redact_next = False
+        for segment in parsed.path.split("/"):
+            if redact_next and not segment:
+                safe_segment = segment
+            elif redact_next or _LOG_LONG_TOKEN.fullmatch(segment):
+                safe_segment = "[REDACTED]"
+                redact_next = False
+            else:
+                safe_segment = segment
+            path_parts.append(safe_segment)
+            if _LOG_SECRET_PATH_MARKER.fullmatch(segment):
+                redact_next = True
+        safe_query = []
+        for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+            safe_key = "[REDACTED_KEY]" if _LOG_SENSITIVE_NAME.search(key) else key
+            safe_query.append((safe_key, "[REDACTED]"))
+        safe_netloc = parsed.netloc.rsplit("@", 1)[-1]
+        safe = urlunsplit((parsed.scheme, safe_netloc, "/".join(path_parts),
+                           urlencode(safe_query), ""))
+        return _safe_log_text(safe, 1024)
+    except (TypeError, ValueError, UnicodeError):
+        return "[invalid-url]"
+
+
+def redact_http_headers_for_log(headers, base_url=""):
+    """Keep safe header values, redact known secrets, and omit unknown values."""
+    safe = []
+    for index, (name, value) in enumerate(headers.items()):
+        if index >= 100:
+            safe.append({"name": "[TRUNCATED]", "value": "header-count-limit"})
+            break
+        header_name = _safe_log_text(name, 128)
+        normalized = str(name).lower()
+        if _LOG_SENSITIVE_NAME.search(normalized):
+            header_value = "[REDACTED]"
+        elif normalized in {"location", "referer"}:
+            header_value = redact_url_for_log(urljoin(base_url, str(value)))
+        elif normalized in _AUDITABLE_HEADER_VALUES:
+            header_value = _safe_log_text(value)
+        else:
+            header_value = "[OMITTED]"
+        safe.append({"name": header_name, "value": header_value})
+    return safe
+
+
+def configure_logging():
+    level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    HTTP_LOGGER.setLevel(level)
+    logging.getLogger("discord").setLevel(logging.WARNING)
 
 
 def retry_wait_seconds(retry_after, attempt):
@@ -742,6 +827,126 @@ class IronveilDeobfuscator:
         await self._stop()
 
 
+class MoonVeilDeobfuscator:
+    """Run the pinned MoonVeil 1.4.5 profile with static analysis only."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "mv-engine"
+        self.root = Path(os.environ.get("MV_ENGINE_DIR", str(default))).resolve()
+        self.cli = self.root / "luauvmp" / "cli.py"
+        self.profile = self.root / "profiles" / "moonveil-1.4.5.json"
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {
+            "PATH": os.defpath,
+            "LANG": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(self.root),
+        }
+
+    async def prepare(self):
+        if not self.cli.is_file() or not self.profile.is_file():
+            raise ProcessingError("No encuentro el motor `.mv`. Reconstruye y despliega la imagen Docker.")
+        try:
+            import json as _json
+            _json.loads(self.profile.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise ProcessingError("El perfil del motor `.mv` está incompleto o no es válido.") from None
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "luauvmp.cli", "--help",
+            cwd=str(self.root), env=self.environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+            if process.returncode or b"usage: luauvmp" not in output.lower():
+                raise ProcessingError("No pude iniciar el motor estático `.mv`.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("El motor `.mv` no respondió al iniciar.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(process.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+        await process.wait()
+
+    async def run(self, source, timeout=90):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            output_base = source.parent / "moonveil-output"
+            result = Path(str(output_base) + ".deobf.lua")
+            try:
+                result.unlink()
+            except FileNotFoundError:
+                pass
+
+            def limit_child_resources():
+                import resource
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 2))
+                resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+                memory_limit = 768 * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+            command = [
+                sys.executable, "-m", "luauvmp.cli", "deobf", str(source.resolve()),
+                "--profile", str(self.profile), "--output", str(output_base.resolve()),
+            ]
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    *command, cwd=str(self.root), env=self.environment, stdout=log, stderr=log,
+                    start_new_session=os.name != "nt",
+                    preexec_fn=limit_child_resources if os.name != "nt" else None,
+                )
+                self.process = process
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout + 3)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo `.mv` superó el tiempo permitido.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0:
+                    raise ProcessingError("MoonVeil no pudo recuperar este archivo; comprueba que sea compatible con V1.4.5.")
+                if not result.is_file() or result.stat().st_size == 0:
+                    raise ProcessingError("MoonVeil no produjo una salida para este archivo.")
+                if result.stat().st_size > 32 * 1024 * 1024:
+                    raise ProcessingError("El resultado `.mv` supera el límite de 32 MiB.")
+                return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class DeobfBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -750,12 +955,13 @@ class DeobfBot(commands.Bot):
         self.ironbrew_engine = IronbrewDeobfuscator()
         self.lb_engine = ChaoticEvilDeobfuscator()
         self.iv_engine = IronveilDeobfuscator()
+        self.mv_engine = MoonVeilDeobfuscator()
         self.engine_errors = {}
 
     async def setup_hook(self):
         for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
                              ("ironbrew", self.ironbrew_engine), ("lb", self.lb_engine),
-                             ("iv", self.iv_engine)):
+                             ("iv", self.iv_engine), ("mv", self.mv_engine)):
             try:
                 await engine.prepare()
             except (ProcessingError, OSError) as error:
@@ -772,6 +978,7 @@ class DeobfBot(commands.Bot):
             await self.ironbrew_engine.close()
             await self.lb_engine.close()
             await self.iv_engine.close()
+            await self.mv_engine.close()
 
 
 def create_bot(owner_id):
@@ -788,6 +995,7 @@ def create_bot(owner_id):
     ironbrew_cache = ResultCache()
     lb_cache = ResultCache()
     iv_cache = ResultCache()
+    mv_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -796,7 +1004,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .lb e .iv.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .lb, .iv y .mv.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -810,8 +1018,9 @@ def create_bot(owner_id):
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
+            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — prueba recuperación estática de MoonVeil V1.4.5; no ejecuta el script ni lo sube a servicios externos.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb` y `.iv` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv` y `.mv` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -865,17 +1074,42 @@ def create_bot(owner_id):
                             sock_read=min(10, remaining),
                         )
                         retry_delay = None
+                        request_started = time.perf_counter()
+                        safe_url = redact_url_for_log(current_url)
+                        HTTP_LOGGER.info(
+                            "get_request method=GET attempt=%d/%d url=%s headers=%s",
+                            attempt + 1, MAX_FETCH_ATTEMPTS, safe_url,
+                            json.dumps(redact_http_headers_for_log(request_headers), ensure_ascii=False, sort_keys=True),
+                        )
                         try:
                             async with session.get(
                                 current_url, allow_redirects=False, timeout=attempt_timeout,
                             ) as response:
+                                actual_request_headers = getattr(
+                                    getattr(response, "request_info", None), "headers", request_headers,
+                                )
+                                HTTP_LOGGER.info(
+                                    "get_response status=%d attempt=%d/%d url=%s headers_elapsed_ms=%d "
+                                    "request_headers=%s response_headers=%s",
+                                    response.status, attempt + 1, MAX_FETCH_ATTEMPTS, safe_url,
+                                    int((time.perf_counter() - request_started) * 1000),
+                                    json.dumps(redact_http_headers_for_log(actual_request_headers, current_url),
+                                               ensure_ascii=False, sort_keys=True),
+                                    json.dumps(redact_http_headers_for_log(response.headers, current_url),
+                                               ensure_ascii=False, sort_keys=True),
+                                )
                                 if response.status in RETRYABLE_HTTP_STATUSES and attempt < MAX_FETCH_ATTEMPTS - 1:
                                     retry_delay = retry_wait_seconds(
                                         response.headers.get("Retry-After"), attempt,
                                     )
                                     if retry_delay is not None and loop.time() + retry_delay < deadline:
                                         # Do not read an arbitrary retry body; closing it releases the socket safely.
-                                        pass
+                                        HTTP_LOGGER.warning(
+                                            "get_retry reason=http_status status=%d attempt=%d/%d "
+                                            "wait_seconds=%.2f url=%s",
+                                            response.status, attempt + 1, MAX_FETCH_ATTEMPTS,
+                                            retry_delay, safe_url,
+                                        )
                                     else:
                                         retry_delay = None
                                 if retry_delay is None:
@@ -932,12 +1166,28 @@ def create_bot(owner_id):
                                                 return
                                             chunks.append(chunk)
                                         raw_data = b"".join(chunks)
-                        except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                                        HTTP_LOGGER.info(
+                                            "get_body_complete status=%d attempt=%d/%d url=%s "
+                                            "bytes=%d elapsed_ms=%d",
+                                            response.status, attempt + 1, MAX_FETCH_ATTEMPTS,
+                                            safe_url, len(raw_data),
+                                            int((time.perf_counter() - request_started) * 1000),
+                                        )
+                        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as error:
+                            HTTP_LOGGER.warning(
+                                "get_connection_error attempt=%d/%d url=%s error_type=%s",
+                                attempt + 1, MAX_FETCH_ATTEMPTS, safe_url, type(error).__name__,
+                            )
                             if attempt >= MAX_FETCH_ATTEMPTS - 1:
                                 raise
                             retry_delay = min(0.5 * (2 ** attempt), 2.0)
                             if loop.time() + retry_delay >= deadline:
                                 raise asyncio.TimeoutError
+                            HTTP_LOGGER.warning(
+                                "get_retry reason=connection_error attempt=%d/%d "
+                                "wait_seconds=%.2f url=%s",
+                                attempt + 1, MAX_FETCH_ATTEMPTS, retry_delay, safe_url,
+                            )
                         if retry_delay is not None:
                             await asyncio.sleep(retry_delay)
                             continue
@@ -1015,7 +1265,7 @@ def create_bot(owner_id):
         if version and version not in LURAPH_VERSIONS:
             await ctx.send("Versión no válida: usa 14.7, 14.8, 14.9 o 15.")
             return
-        extensions = (".lua", ".luau", ".txt") if command == "luraph" else (".lua", ".txt")
+        extensions = (".lua", ".luau", ".txt") if command in {"luraph", "mv"} else (".lua", ".txt")
         url = url.strip().strip("<>")
         attachments = ctx.message.attachments
         if url and attachments:
@@ -1144,6 +1394,10 @@ def create_bot(owner_id):
     async def iv(ctx, url: str = ""):
         await process_attachment(ctx, url, bot.iv_engine, iv_cache, "iv")
 
+    @bot.command(name="mv")
+    async def mv(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.mv_engine, mv_cache, "mv")
+
     return bot
 
 
@@ -1191,6 +1445,7 @@ SERVICE_STARTED = time.time()
 
 
 async def main():
+    configure_logging()
     token = os.environ.get("DISCORD_TOKEN", "")
     owner = os.environ.get("DISCORD_OWNER_ID", "")
     if not token or not owner.isdecimal():

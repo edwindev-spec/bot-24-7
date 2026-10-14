@@ -17,6 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEOBF_RECOVER_DIR=/app/prometheus-recover \
     LURAPH_RECOVER_DIR=/app/luraph-fusion \
     LURAPH_CACHE_DIR=/app/cache \
+    MV_ENGINE_DIR=/app/mv-engine \
     IRONBREW_DEOBF_PATH=/app/ironbrew/IronbrewAdapter \
     PATH=/opt/venv/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,6 +47,7 @@ RUN python3 /app/prepare_engine.py --skip-dependencies --jobs 2
 COPY bot/result_cache.py ./result_cache.py
 COPY bot/lb-engine /app/lb-engine
 COPY bot/iv-engine /app/iv-engine
+COPY bot/mv-engine /app/mv-engine
 COPY bot/bot.py ./bot.py
 EXPOSE 8080
 CMD ["python", "/app/bot.py"]
