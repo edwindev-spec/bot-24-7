@@ -11,7 +11,7 @@ No ejecutes el bot como una Vercel Function: necesita una conexión continua con
 - `.lb <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): prueba LuaObfuscator Chaotic Evil mediante análisis estático solamente; no ejecuta el Lua recibido. La recuperación es best-effort.
 - `.iv <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): intenta recuperar Ironveil V1 y devuelve código Lua como `resultado.lua`.
 - `.luraph`: procesa `.lua`, `.luau` o `.txt` (hasta 2 MiB) para Luraph v14.7–v15; si no se detecta la versión, indica una con el adjunto, por ejemplo `.luraph 14.8`.
-- `.get <URL>`: devuelve `raw.txt` desde una URL HTTP(S) pública (hasta 2 MiB), validando hasta cinco redirecciones.
+- `.get <URL>`: devuelve `raw.txt` desde una URL HTTP(S) pública (hasta 2 MiB); comprueba todos los IP devueltos por DNS y cada destino de hasta cinco redirecciones, bloquea direcciones privadas y no permite degradar HTTPS a HTTP.
 
 Tras cambiar archivos o añadir el motor, reconstruye y despliega la imagen Docker; reiniciar un contenedor anterior no incorpora la actualización. El motor Luraph se incluye con su licencia y se compila durante el build. Ironbrew se obtiene en un commit fijado y se compila como .NET 8 en la etapa Docker; la imagen incluye su licencia GPL-3.0. `.lb` se distribuye con permiso confirmado por el usuario; el upstream no declara licencia y el modo instalado es estático, sin Lupa. `.iv` se incluye bajo MIT; se deshabilitó el helper upstream basado en `eval`. Ambos procesos tienen timeout y límites de recursos.
 

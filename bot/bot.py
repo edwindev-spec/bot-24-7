@@ -5,6 +5,7 @@ import io
 import ipaddress
 import json
 import signal
+import socket
 import sys
 import shutil
 import os
@@ -44,6 +45,70 @@ PARTIAL_HEADER = b"-- Recuperacion parcial: algunos bloques no pudieron recupera
 LURAPH_VERSIONS = ("14.7", "14.8", "14.9", "15")
 MAX_INPUT = 2 * 1024 * 1024
 BUSY = asyncio.Lock()
+
+
+def validate_public_http_url(url, require_https=False):
+    """Validate URL syntax and reject literal non-public IP addresses."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Only HTTP(S) URLs are accepted")
+    if require_https and parsed.scheme != "https":
+        raise ValueError("HTTPS redirects may not downgrade to HTTP")
+    if parsed.username or parsed.password:
+        raise ValueError("Credentials in URLs are not accepted")
+    # Accessing .port forces urllib to reject malformed/out-of-range ports early.
+    _ = parsed.port
+    hostname = parsed.hostname.rstrip(".").lower()
+    if (hostname in {"localhost", "localhost.localdomain"}
+            or hostname.endswith((".localhost", ".local"))):
+        raise ValueError("Local hostnames are not accepted")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and not is_public_address(address):
+        raise ValueError("Non-public IP addresses are not accepted")
+    return parsed
+
+
+def is_public_address(address):
+    """Check routability, including IPv4 addresses embedded in IPv6 forms."""
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped or address.sixtofour
+        if embedded is not None and not embedded.is_global:
+            return False
+        teredo = address.teredo
+        if teredo is not None and any(not item.is_global for item in teredo):
+            return False
+        # The well-known NAT64 prefix preserves the IPv4 address in its low 32 bits.
+        if address in ipaddress.IPv6Network("64:ff9b::/96"):
+            translated = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+            if not translated.is_global:
+                return False
+    return address.is_global
+
+
+class PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+    """Resolve a hostname only when every returned address is globally routable."""
+
+    def __init__(self, resolver=None):
+        self.resolver = resolver or aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        records = await self.resolver.resolve(host, port, family)
+        if not records:
+            raise OSError("DNS returned no addresses")
+        for record in records:
+            try:
+                address = ipaddress.ip_address(record["host"])
+            except (KeyError, ValueError, TypeError) as error:
+                raise OSError("DNS returned an invalid address") from error
+            if not is_public_address(address):
+                raise OSError("DNS resolved to a non-public address")
+        return records
+
+    async def close(self):
+        await self.resolver.close()
 
 
 class ProcessingError(Exception):
@@ -716,7 +781,7 @@ def create_bot(owner_id):
         await ctx.send(
             "**Comandos disponibles**\n"
             "`.help` — Muestra esta lista.\n"
-            "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB).\n"
+            "`.get <URL>` — Descarga contenido HTTP(S) público y lo entrega como `raw.txt` (máx. 2 MiB); valida DNS y cada redirección.\n"
             "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
             "`.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación estática para LuaObfuscator Chaotic Evil; best-effort, sin ejecutar el script.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
@@ -736,20 +801,7 @@ def create_bot(owner_id):
             await ctx.send("Uso: `.get <URL>`")
             return
         try:
-            parsed = urlsplit(url)
-            if parsed.scheme not in ("http", "https") or not parsed.hostname:
-                raise ValueError
-            if parsed.username or parsed.password:
-                raise ValueError
-            hostname = parsed.hostname.rstrip(".").lower()
-            if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost") or hostname.endswith(".local"):
-                raise ValueError
-            try:
-                address = ipaddress.ip_address(hostname)
-            except ValueError:
-                address = None
-            if address is not None and (not address.is_global):
-                raise ValueError
+            parsed = validate_public_http_url(url)
         except (ValueError, UnicodeError):
             await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
             return
@@ -760,25 +812,23 @@ def create_bot(owner_id):
             "Accept": "text/plain, application/json, application/octet-stream, text/html;q=0.8, */*;q=0.5",
         }
         current_url = url
+        https_required = parsed.scheme == "https"
         try:
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=False, headers=request_headers) as session:
+            connector = aiohttp.TCPConnector(
+                resolver=PublicOnlyResolver(), use_dns_cache=True, ttl_dns_cache=60,
+            )
+            async with aiohttp.ClientSession(
+                timeout=timeout, trust_env=False, headers=request_headers,
+                connector=connector, cookie_jar=aiohttp.DummyCookieJar(),
+            ) as session:
                 # Follow a small number of redirects manually so each destination is validated.
                 for _ in range(6):
-                    parsed = urlsplit(current_url)
-                    hostname = (parsed.hostname or "").rstrip(".").lower()
-                    if parsed.scheme not in ("http", "https") or not hostname or parsed.username or parsed.password:
-                        await ctx.send("La URL o una redirección apunta a una dirección no permitida.")
-                        return
-                    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".localhost", ".local")):
-                        await ctx.send("La URL o una redirección apunta a una dirección no permitida.")
-                        return
                     try:
-                        address = ipaddress.ip_address(hostname)
-                    except ValueError:
-                        address = None
-                    if address is not None and not address.is_global:
-                        await ctx.send("La URL o una redirección apunta a una dirección no pública.")
+                        parsed = validate_public_http_url(current_url, require_https=https_required)
+                    except (ValueError, UnicodeError):
+                        await ctx.send("La URL o una redirección apunta a una dirección no permitida.")
                         return
+                    https_required = https_required or parsed.scheme == "https"
 
                     async with session.get(current_url, allow_redirects=False) as response:
                         if response.status in (301, 302, 303, 307, 308):
@@ -790,6 +840,9 @@ def create_bot(owner_id):
                             continue
                         if response.status != 200:
                             await ctx.send(f"La URL respondió con HTTP {response.status}; no se creó el archivo.")
+                            return
+                        if response.content_length is not None and response.content_length > MAX_INPUT:
+                            await ctx.send("El contenido supera el límite de 2 MiB.")
                             return
                         chunks = []
                         total = 0
