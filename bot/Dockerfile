@@ -11,6 +11,22 @@ COPY ironbrew-adapter/ ./ironbrew-adapter/
 RUN dotnet publish ./ironbrew-adapter/IronbrewAdapter.csproj -c Release -r linux-x64 \
     --self-contained true -o /out
 
+FROM debian:bookworm-slim AS luau-build
+ARG LUAU_COMMIT=32d52d1b2ceef46fc25d87094a2d7f201c3ea5b8
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git cmake build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /src/luau \
+    && git -C /src/luau remote add origin https://github.com/luau-lang/luau.git \
+    && git -C /src/luau fetch --depth=1 origin ${LUAU_COMMIT} \
+    && git -C /src/luau checkout --detach FETCH_HEAD \
+    && test "$(git -C /src/luau rev-parse HEAD)" = "${LUAU_COMMIT}"
+RUN cmake -S /src/luau -B /src/luau-build -DCMAKE_BUILD_TYPE=Release \
+    -DLUAU_BUILD_CLI=ON -DLUAU_BUILD_TESTS=OFF -DLUAU_BUILD_WEB=OFF \
+    && cmake --build /src/luau-build --target Luau.Repl.CLI Luau.Compile.CLI --parallel 2 \
+    && install -D /src/luau-build/luau /out/luau \
+    && install -D /src/luau-build/luau-compile /out/luau-compile
+
 FROM node:22-bookworm-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -18,6 +34,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LURAPH_RECOVER_DIR=/app/luraph-fusion \
     LURAPH_CACHE_DIR=/app/cache \
     MV_ENGINE_DIR=/app/mv-engine \
+    LUAU_PATH=/usr/local/bin/luau \
     IRONBREW_DEOBF_PATH=/app/ironbrew/IronbrewAdapter \
     PATH=/opt/venv/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -38,6 +55,7 @@ RUN git init /app/prometheus-recover \
 
 COPY --from=ironbrew-build /out/ /app/ironbrew/
 COPY --from=ironbrew-build /src/IronbrewDeobfuscator/LICENSE /app/licenses/IRONBREW-GPL-3.0.txt
+COPY --from=luau-build /out/ /usr/local/bin/
 COPY prepare_engine.py ./prepare_engine.py
 COPY luraph-fusion /app/luraph-fusion
 RUN python3 /app/prepare_engine.py --skip-dependencies --jobs 2

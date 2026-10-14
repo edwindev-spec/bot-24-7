@@ -1,10 +1,7 @@
-# Aviso de MoonVeil Deobfuscator
+# Aviso de terceros: MoonVeil
 
-- Proyecto fuente: `binxgtl/luau-vmp-deobf`.
-- Commit integrado: `2ef18387b69e94ce71e42d2b2c2456329f208f99`.
-- Licencia upstream: MIT; el texto íntegro se distribuye junto al código en `LICENSE`.
-- Integración utilizada: comando estático `luauvmp deobf` con `profiles/moonveil-1.4.5.json`.
-- El bot no ejecuta el Lua de entrada, no invoca el runtime Lune y no llama a `lua.expert` ni a otros servicios de decompilación externos.
-- El contenedor aplica límites de tiempo, CPU, memoria, tamaño de archivos y descriptores al proceso.
+El motor proviene de [`UnstableGrape/Moonveil-1.4.5-Deobfuscator`](https://github.com/UnstableGrape/Moonveil-1.4.5-Deobfuscator), commit `93c2d8169bf1fe0959c00b34fffd7889dd1ce2cf`, bajo MIT. El código fuente y `LICENSE.txt` se distribuyen juntos.
 
-El resultado depende de que el archivo sea compatible con el perfil MoonVeil 1.4.5; otros formatos o variantes pueden producir errores o una recuperación incompleta.
+El runtime y el compilador provienen del proyecto oficial [`luau-lang/luau`](https://github.com/luau-lang/luau), versión `0.722`, commit `32d52d1b2ceef46fc25d87094a2d7f201c3ea5b8`, también bajo MIT. El contenedor los compila durante la construcción; `LUAU_LICENSE.txt` conserva su licencia.
+
+El handler usa `moonveil decompile --no-verify`. Esto omite la comparación de comportamiento que ejecutaría el programa protegido. La recuperación sí ejecuta etapas instrumentadas del bootstrap del formato dentro del CLI Luau. El subproceso tiene límites de CPU, memoria, tiempo, archivos y descriptores, y no recibe el token de Discord ni otras variables del entorno del bot.

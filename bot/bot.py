@@ -828,41 +828,47 @@ class IronveilDeobfuscator:
 
 
 class MoonVeilDeobfuscator:
-    """Run the pinned MoonVeil 1.4.5 profile with static analysis only."""
+    """Run MoonVeil v1.4.5 decode steps with protected-program verification disabled."""
 
     def __init__(self):
         default = Path(__file__).resolve().parent / "mv-engine"
         self.root = Path(os.environ.get("MV_ENGINE_DIR", str(default))).resolve()
-        self.cli = self.root / "luauvmp" / "cli.py"
-        self.profile = self.root / "profiles" / "moonveil-1.4.5.json"
+        self.cli = self.root / "moonveil" / "cli.py"
+        self.luau_path = Path(
+            os.environ.get("LUAU_PATH", "/usr/local/bin/luau")
+        ).expanduser().resolve()
         self.process = None
         self.lock = asyncio.Lock()
         self.closed = False
         self.environment = {
-            "PATH": os.defpath,
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPATH": str(self.root),
+            "LUAU_PATH": str(self.luau_path),
         }
 
     async def prepare(self):
-        if not self.cli.is_file() or not self.profile.is_file():
-            raise ProcessingError("No encuentro el motor `.mv`. Reconstruye y despliega la imagen Docker.")
-        try:
-            import json as _json
-            _json.loads(self.profile.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            raise ProcessingError("El perfil del motor `.mv` está incompleto o no es válido.") from None
+        compiler = self.luau_path.with_name("luau-compile")
+        if (
+            not self.cli.is_file()
+            or not self.luau_path.is_file()
+            or not compiler.is_file()
+        ):
+            raise ProcessingError(
+                "No encuentro MoonVeil o el runtime/compilador Luau. "
+                "Reconstruye y despliega la imagen Docker."
+            )
         process = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "luauvmp.cli", "--help",
+            sys.executable, "-m", "moonveil", "--help",
             cwd=str(self.root), env=self.environment,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             start_new_session=os.name != "nt",
         )
         try:
             output, _ = await asyncio.wait_for(process.communicate(), timeout=15)
-            if process.returncode or b"usage: luauvmp" not in output.lower():
-                raise ProcessingError("No pude iniciar el motor estático `.mv`.")
+            if process.returncode or b"usage: moonveil" not in output.lower():
+                raise ProcessingError("No pude iniciar el motor MoonVeil `.mv`.")
         except asyncio.TimeoutError:
             raise ProcessingError("El motor `.mv` no respondió al iniciar.") from None
         finally:
@@ -912,14 +918,16 @@ class MoonVeilDeobfuscator:
             def limit_child_resources():
                 import resource
                 resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 2))
+                resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
                 resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
                 resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
                 memory_limit = 768 * 1024 * 1024
                 resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
 
             command = [
-                sys.executable, "-m", "luauvmp.cli", "deobf", str(source.resolve()),
-                "--profile", str(self.profile), "--output", str(output_base.resolve()),
+                sys.executable, "-m", "moonveil", "decompile", str(source.resolve()),
+                "--output", str(result.resolve()), "--no-verify",
+                "--timeout", str(timeout),
             ]
             with tempfile.TemporaryFile() as log:
                 process = await asyncio.create_subprocess_exec(
@@ -1052,7 +1060,7 @@ def create_bot(owner_id):
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
-            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — prueba recuperación estática de MoonVeil V1.4.5; no ejecuta el script ni lo sube a servicios externos.\n"
+            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con decodificación instrumentada en Luau; omite la verificación del programa protegido y no lo sube a servicios externos.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
             "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv` y `.mv` están restringidos al propietario configurado del bot."
         )

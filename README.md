@@ -41,7 +41,7 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 - `.ironbrew <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): devuelve bytecode Lua 5.1 como `resultado.luac`.
 - `.lb <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): prueba recuperación **estática** para LuaObfuscator Chaotic Evil; devuelve Lua de texto. No ejecuta el script y los resultados son best-effort.
 - `.iv <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): intenta recuperar Ironveil V1 y devuelve Lua de texto en `resultado.lua`.
-- `.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (hasta 2 MiB): prueba recuperación estática de MoonVeil V1.4.5 con el perfil dedicado; no ejecuta el script de entrada ni lo envía a servicios externos.
+- `.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (hasta 2 MiB): recupera MoonVeil V1.4.5 con el motor solicitado; usa el host oficial Luau para las etapas instrumentadas de decodificación y omite la comparación de comportamiento que ejecutaría el programa protegido.
 - `.luraph`: procesa adjuntos `.lua`, `.luau` o `.txt` (hasta 2 MiB) para Luraph v14.7–v15. Si no detecta la versión, indica una con el adjunto, por ejemplo `.luraph 14.8`.
 - `.get <URL>`: hace GET a URLs y APIs HTTP(S) públicas (máx. 2 MiB); devuelve JSON válido formateado en `raw.json` —con vista previa si es pequeño— y otros datos como `raw.txt`. Valida los IP de DNS y cada destino de hasta cinco redirecciones, bloquea redes privadas y evita downgrades HTTPS.
 - Ante respuestas `401`, `403`, `429` o `204`, `.get` explica autenticación, acceso bloqueado, límite de solicitudes o ausencia de contenido; también muestra detalles JSON de otros errores cuando están disponibles.
@@ -50,7 +50,7 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 
 `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv` y `.mv` solo responden al `DISCORD_OWNER_ID` configurado.
 
-Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render. El motor Luraph va incluido como fuente licenciada y sus herramientas se compilan durante la construcción; reiniciar un contenedor antiguo no incorpora esta actualización.
+Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render. El motor Luraph va incluido como fuente licenciada y sus herramientas se compilan durante la construcción. Luau oficial 0.722 también se compila desde el commit fijado para `.mv`; reiniciar un contenedor antiguo no incorpora estas actualizaciones.
 
 ### Caché Luraph
 
@@ -64,6 +64,6 @@ El bot conserva hasta 256 resultados verificados (máximo 128 MiB) en SQLite. La
 - Ironbrew Deobfuscator se compila desde `Lethal-Luka/IronbrewDeobfuscator` en el commit fijado `43dfbd8fcff52c1f0b9d1ad32ae45142c03683d4`, bajo GPL-3.0; su licencia se incluye en la imagen Docker.
 - `.lb` integra `lovesyko/LuaObfuscatorChaoticEvilDeobfuscator` desde `7a3a80ce5ee1f9909bcdf85148b82d1a4c03208d`, con permiso del usuario confirmado en esta conversación. El upstream no declara licencia; la copia vendorizada elimina la ejecución dinámica/Lupa y corre solo análisis estático, aislado con límites de recursos. Ver `bot/lb-engine/NOTICE.md`.
 - `.iv` integra Ironveil Deobfuscator V1 desde `prostone55/Ironveil-Deobfuscator-V1` en el commit `64b27cfd0cb80919ccefdc8a2e61d6f7d742fb5a`, con licencia MIT incluida. El parser trabaja sobre el texto/bytecode; se deshabilitó el helper upstream que usaba `eval` y el proceso tiene límites de memoria/CPU/tiempo.
-- `.mv` integra `binxgtl/luau-vmp-deobf` desde `2ef18387b69e94ce71e42d2b2c2456329f208f99`, bajo MIT. Usa solo el subcomando estático `deobf` y el perfil MoonVeil 1.4.5; no ejecuta la entrada ni usa Lune o `lua.expert`. Ver `bot/mv-engine/NOTICE.md`.
+- `.mv` integra `UnstableGrape/Moonveil-1.4.5-Deobfuscator` desde `93c2d8169bf1fe0959c00b34fffd7889dd1ce2cf`, bajo MIT, y Luau oficial `0.722` desde `32d52d1b2ceef46fc25d87094a2d7f201c3ea5b8`, también bajo MIT. El bot omite la verificación del programa protegido y ejecuta el motor en un proceso limitado por tiempo, CPU, memoria, tamaño de archivos y descriptores. El decoder instrumentado sí ejecuta etapas de bootstrap del formato; no debe describirse como análisis puramente estático. Ver `bot/mv-engine/THIRD_PARTY_NOTICES.md`.
 - La caché de resultados se limita a 128 MiB y 256 entradas; su persistencia depende de que el proveedor tenga un volumen montado en la ruta configurada.
 - Vercel aloja la web, pero el bot solo estará 24/7 mientras el proveedor del servicio de bot mantenga la instancia encendida.
