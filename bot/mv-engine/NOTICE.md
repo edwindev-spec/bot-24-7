@@ -4,4 +4,4 @@ El paquete proviene de [`edwindev-spec/MoonVeil`](https://github.com/edwindev-sp
 
 El runtime y el compilador Luau se construyen desde el proyecto oficial `luau-lang/luau`, versión `0.722`, commit `32d52d1b2ceef46fc25d87094a2d7f201c3ea5b8`, bajo MIT; la licencia se conserva en `LUAU_LICENSE.txt`.
 
-El handler usa `moonveil decompile --no-verify`: omite la comparación de trazas del programa protegido, pero las etapas instrumentadas de recuperación sí ejecutan partes del bootstrap en Luau. El proceso recibe un entorno reducido y límites de CPU, memoria, tiempo, tamaño de archivos, descriptores y core dumps. Esto no constituye aislamiento del sistema operativo.
+La integración local mantiene todos los modos de recuperación y ejecuta como máximo dos probes independientes en paralelo. El handler usa `moonveil decompile --no-verify`: omite la comparación de trazas del programa protegido, pero las etapas instrumentadas de recuperación sí ejecutan partes del bootstrap en Luau. El proceso recibe un entorno reducido y límites de CPU, memoria, tiempo, tamaño de archivos, descriptores y core dumps. Esto no constituye aislamiento del sistema operativo.

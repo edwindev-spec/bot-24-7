@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import tempfile
 import uuid
@@ -143,18 +144,28 @@ def _run_core_modes(
     schema = None
     layout = None
     metadata = None
-    for mode in _PROBE_MODES:
-        output, _stderr, schema, layout = run_decode(
+
+    def decode_mode(mode: str):
+        return run_decode(
             source_path,
             graph,
             luau_path=luau_path,
             timeout=timeout,
             mode=mode,
         )
-        if metadata is None:
-            metadata = normalize_metadata(source, graph, schema)
-        decoded_modes[mode] = parse_decode_protocol(output, metadata)
-        protocols[mode] = output
+
+    # Each mode starts an independent Luau process. Run two at a time to cut
+    # wall-clock latency without multiplying memory/CPU use by all probes.
+    with ThreadPoolExecutor(
+        max_workers=min(2, len(_PROBE_MODES)),
+        thread_name_prefix="moonveil-probe",
+    ) as executor:
+        results = executor.map(decode_mode, _PROBE_MODES)
+        for mode, (output, _stderr, schema, layout) in zip(_PROBE_MODES, results):
+            if metadata is None:
+                metadata = normalize_metadata(source, graph, schema)
+            decoded_modes[mode] = parse_decode_protocol(output, metadata)
+            protocols[mode] = output
     assert schema is not None and layout is not None and metadata is not None
     return decoded_modes, protocols, schema, layout, metadata
 
@@ -242,20 +253,28 @@ def recover_v145(
         schema = alternate_dump.schema
         layout = alternate_dump.layout
         metadata = normalize_metadata(source, graph, schema)
-        for mode in _PROBE_MODES:
-            output, _stderr, returned_schema, returned_layout = (
-                run_alternate_decode(
-                    source_path,
-                    graph,
-                    luau_path=luau_path,
-                    timeout=timeout,
-                    mode=mode,
-                )
+
+        def decode_alternate_mode(mode: str):
+            return run_alternate_decode(
+                source_path,
+                graph,
+                luau_path=luau_path,
+                timeout=timeout,
+                mode=mode,
             )
-            schema = returned_schema
-            layout = returned_layout
-            decoded_modes[mode] = parse_decode_protocol(output, metadata)
-            protocols[mode] = output
+
+        with ThreadPoolExecutor(
+            max_workers=min(2, len(_PROBE_MODES)),
+            thread_name_prefix="moonveil-alt-probe",
+        ) as executor:
+            results = executor.map(decode_alternate_mode, _PROBE_MODES)
+            for mode, (output, _stderr, returned_schema, returned_layout) in zip(
+                _PROBE_MODES, results
+            ):
+                schema = returned_schema
+                layout = returned_layout
+                decoded_modes[mode] = parse_decode_protocol(output, metadata)
+                protocols[mode] = output
     else:
         try:
             graph, _dump_stderr = run_dump(
@@ -350,4 +369,3 @@ def recover_v145(
 
 
 __all__ = ["V145RecoveryResult", "recover_v145"]
-
