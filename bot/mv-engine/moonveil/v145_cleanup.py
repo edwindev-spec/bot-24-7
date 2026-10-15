@@ -43,6 +43,9 @@ def _remote_loader(ir: dict[str, Any]) -> str | None:
         or game_import.get("path") != ["game"]
         or not isinstance(url.get("value"), str)
         or namecall.get("key") != "HttpGet"
+        or int(namecall.get("a", -1)) != int(load_import.get("a", -3)) + 1
+        or int(url.get("a", -1)) != int(namecall.get("a", -4)) + 2
+        or int(ret.get("b", -1)) != 1
         or int(namecall.get("b", -1)) != int(game_import.get("a", -2))
         or int(http_call.get("a", -1)) != int(namecall.get("a", -2))
         or int(http_call.get("b", -1)) != 3

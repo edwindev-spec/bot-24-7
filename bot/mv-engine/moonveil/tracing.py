@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+
+from .errors import MoonVeilTimeoutError
 import tempfile
 import uuid
 from pathlib import Path
@@ -402,7 +404,7 @@ def run_decode_all(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MoonVeilError(
+            raise MoonVeilTimeoutError(
                 f"exhaustive decoder exceeded the {timeout:g}s timeout"
             ) from exc
     finally:
@@ -485,11 +487,16 @@ def _run_instrumented_text(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MoonVeilError(
+            raise MoonVeilTimeoutError(
                 f"{prefix} exceeded the {timeout:g}s timeout"
             ) from exc
     finally:
         instrumented_path.unlink(missing_ok=True)
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace")[-2000:]
+        raise MoonVeilError(
+            f"{prefix} exited with code {completed.returncode}:\n{detail}"
+        )
     return (
         completed.stdout.decode("utf-8", errors="replace"),
         completed.stderr.decode("utf-8", errors="replace"),
@@ -515,7 +522,7 @@ def canonical_external_trace(output: str) -> list[str]:
             except ValueError:
                 failure = ""
             normalized = re.sub(
-                r"^[A-Za-z]:[/\\].*?\.luau:\d+:\s*",
+                r"^(?:[A-Za-z]:[/\\]|/).*?\.luau:\d+:\s*",
                 "<source>: ",
                 failure,
             )

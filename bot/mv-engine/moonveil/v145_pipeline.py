@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 import tempfile
 import uuid
@@ -10,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .core import MoonVeilError, run_dump
+from .core import MoonVeilError, _VERSION_RE, read_source, run_dump
+from .errors import MoonVeilTimeoutError
+from .runtime import find_compiler, validate_timeout
 from .decoded import parse_decode_protocol
 from .v145 import run_decode
 from .v145_alternate import is_alternate_v145_source, run_alternate_dump
@@ -20,9 +21,6 @@ from .v145_source import detect_source_level, recover_source_level
 from .v145_verify import verify_alternate_semantic_trace, verify_semantic_trace
 
 
-_V145_BANNER = re.compile(
-    r"MoonVeil(?:\s+Obfuscator)?\s+v?1\.4\.5\b", re.IGNORECASE
-)
 _PROBE_MODES = ("proxy", "symbolic_true", "numeric", "zero", "table", "false", "nil")
 _MAX_VERIFICATION_TIMEOUT = 10.0
 
@@ -59,14 +57,6 @@ class V145RecoveryResult:
         )
 
 
-def _compiler_for(luau_path: Path) -> Path:
-    return luau_path.with_name(
-        "luau-compile.exe"
-        if luau_path.suffix.lower() == ".exe"
-        else "luau-compile"
-    )
-
-
 def _compile_text(
     source: str,
     *,
@@ -75,8 +65,8 @@ def _compile_text(
     timeout: float,
     label: str,
 ) -> dict[str, Any]:
-    compiler = _compiler_for(luau_path)
-    if not compiler.is_file():
+    compiler = find_compiler(luau_path)
+    if compiler is None:
         return {
             "compiled": None,
             "note": "Luau compiler is unavailable; syntax validation was skipped",
@@ -97,7 +87,7 @@ def _compile_text(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MoonVeilError(
+            raise MoonVeilTimeoutError(
                 f"{label} syntax validation exceeded the {timeout:g}s timeout"
             ) from exc
     finally:
@@ -158,7 +148,7 @@ def _run_core_modes(
             source_path,
             graph,
             luau_path=luau_path,
-            timeout=max(timeout, 60.0),
+            timeout=timeout,
             mode=mode,
         )
         if metadata is None:
@@ -178,9 +168,11 @@ def recover_v145(
 ) -> V145RecoveryResult:
     """Recover a complete v1.4.5 input without executing protected behavior."""
 
+    validate_timeout(timeout)
     source_path = source_path.resolve()
-    source = source_path.read_text(encoding="utf-8-sig")
-    if not _V145_BANNER.search(source):
+    source = read_source(source_path)
+    version = _VERSION_RE.search(source)
+    if version is None or version.group(1) != "1.4.5":
         raise MoonVeilError("input is not marked as MoonVeil v1.4.5")
     _validate_complete_input(
         source,
@@ -256,7 +248,7 @@ def recover_v145(
                     source_path,
                     graph,
                     luau_path=luau_path,
-                    timeout=max(timeout, 60.0),
+                    timeout=timeout,
                     mode=mode,
                 )
             )
@@ -302,7 +294,7 @@ def recover_v145(
         recovered,
         source_path=source_path,
         luau_path=luau_path,
-        timeout=max(timeout, 60.0),
+        timeout=timeout,
         label="reconstructed output",
     )
     if compilation.get("compiled") is False:

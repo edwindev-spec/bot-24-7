@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+
+from .errors import MoonVeilTimeoutError
 import tempfile
 import uuid
 from collections import Counter
@@ -813,7 +815,7 @@ def run_decode(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MoonVeilError(
+            raise MoonVeilTimeoutError(
                 f"generic v1.4.5 decoder exceeded the {timeout:g}s timeout"
             ) from exc
     finally:

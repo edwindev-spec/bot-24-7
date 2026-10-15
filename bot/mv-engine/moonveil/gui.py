@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import queue
 import sys
 import threading
 from pathlib import Path
@@ -18,7 +19,11 @@ def main() -> int:
         print("Tkinter is not available in this Python installation.", file=sys.stderr)
         return 2
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        print(f"Cannot open the desktop interface: {exc}", file=sys.stderr)
+        return 2
     root.title(f"MoonVeil v1.4.5 Deobfuscator {__version__}")
     root.geometry("740x450")
     root.minsize(640, 400)
@@ -96,9 +101,21 @@ def main() -> int:
             status_value.set("Decompilation failed; see the log below.")
             messagebox.showerror("MoonVeil Deobfuscator", "Decompilation failed. See the log for details.")
 
+    completed_jobs: queue.SimpleQueue[tuple[int, str, Path]] = queue.SimpleQueue()
+
+    def poll_completed() -> None:
+        try:
+            while True:
+                finished(*completed_jobs.get_nowait())
+        except queue.Empty:
+            pass
+        root.after(100, poll_completed)
+
+    root.after(100, poll_completed)
+
     def run_decompile() -> None:
-        source = Path(input_value.get()).expanduser()
-        output = Path(output_value.get()).expanduser()
+        source = Path(input_value.get()).expanduser().resolve()
+        output = Path(output_value.get()).expanduser().resolve()
         if not source.is_file():
             messagebox.showerror("MoonVeil Deobfuscator", "Choose an existing input file.")
             return
@@ -108,7 +125,7 @@ def main() -> int:
         command = [sys.executable, "-m", "moonveil", "decompile", str(source), "-o", str(output)]
         artifacts = artifacts_value.get().strip()
         if artifacts:
-            command.extend(["--artifacts", artifacts])
+            command.extend(["--artifacts", str(Path(artifacts).expanduser().resolve())])
         if not verify_value.get():
             command.append("--no-verify")
         run_button.configure(state="disabled")
@@ -116,16 +133,20 @@ def main() -> int:
         set_log("Running:\n" + subprocess.list2cmdline(command) + "\n\n")
 
         def worker() -> None:
-            completed = subprocess.run(
-                command,
-                cwd=Path(__file__).resolve().parent.parent,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                check=False,
-            )
-            root.after(0, finished, completed.returncode, completed.stdout, output.resolve())
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=Path(__file__).resolve().parent.parent,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                )
+            except OSError as exc:
+                completed_jobs.put((2, f"Could not start decompilation: {exc}", output.resolve()))
+            else:
+                completed_jobs.put((completed.returncode, completed.stdout, output.resolve()))
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+
+from .errors import MoonVeilTimeoutError
 import tempfile
 import uuid
 from collections import Counter
@@ -868,7 +870,7 @@ def _run_alternate_probe(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MoonVeilError(
+            raise MoonVeilTimeoutError(
                 f"alternate v1.4.5 {kind} exceeded the {timeout:g}s timeout"
             ) from exc
     finally:
@@ -886,7 +888,7 @@ def _run_alternate_probe(
         if runtime_trace
         else "__MOONVEIL_DECODE_END_V1__"
     )
-    if expected not in stdout:
+    if expected not in stdout or completed.returncode != 0:
         detail = stderr[-2000:] or stdout[-2000:]
         raise MoonVeilError(
             f"alternate v1.4.5 {kind} exited before completing "
@@ -971,7 +973,7 @@ def run_alternate_dump(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise MoonVeilError(
+            raise MoonVeilTimeoutError(
                 f"alternate v1.4.5 decoder exceeded the {timeout:g}s timeout"
             ) from exc
     finally:

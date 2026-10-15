@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -13,8 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
-class MoonVeilError(RuntimeError):
-    """Raised when an input cannot be processed safely."""
+from .errors import MoonVeilError
+from .runtime import find_compiler, find_luau
+from .storage import write_text
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,8 @@ class Analysis:
 
 
 _VERSION_RE = re.compile(
-    r"MoonVeil(?: Obfuscator)?(?: v| )(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)"
+    r"MoonVeil(?:\s+Obfuscator)?\s+v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)(?![\w.-])",
+    re.IGNORECASE,
 )
 _FINAL_PAYLOAD_RE = re.compile(
     r"\breturn\s+(?P<alias>[A-Za-z_]\w*)\s*\(\s*"
@@ -134,8 +135,8 @@ def _luau_parse_status(source: str, source_path: Path) -> tuple[bool | None, str
     """Parse a wrapper without executing it when the bundled compiler exists."""
 
     project_root = Path(__file__).resolve().parent.parent
-    compiler = project_root / ".tools" / "luau-0.722" / "luau-compile.exe"
-    if not compiler.is_file():
+    compiler = find_compiler(project_root=project_root)
+    if compiler is None:
         return None, ""
     temporary = Path(tempfile.gettempdir()) / (
         f".moonveil-analyze-{uuid.uuid4().hex}.luau"
@@ -361,7 +362,7 @@ def _decode_atom(token: str) -> dict[str, Any]:
     if not token:
         raise MoonVeilError("empty atom in Luau dump")
     tag, body = token[0], token[1:]
-    if tag == "Z":
+    if token == "Z":
         return {"type": "nil"}
     if tag == "B" and body in {"0", "1"}:
         return {"type": "boolean", "value": body == "1"}
@@ -410,66 +411,54 @@ def parse_dump(stdout: str) -> dict[str, Any]:
     body = stdout[begin + len(_DUMP_BEGIN) : end]
     root: dict[str, Any] | None = None
     tables: dict[int, dict[str, Any]] = {}
+    declared: set[int] = set()
     for raw_line in body.splitlines():
         line = raw_line.strip("\r\n ")
         if not line:
             continue
         fields = line.split("\t")
-        if fields[0] == "R" and len(fields) == 2:
-            root = _decode_atom(fields[1])
-        elif fields[0] == "T" and len(fields) == 2:
-            table_id = int(fields[1])
-            tables.setdefault(table_id, {"id": table_id, "entries": []})
-        elif fields[0] == "E" and len(fields) == 4:
-            table_id = int(fields[1])
-            table = tables.setdefault(table_id, {"id": table_id, "entries": []})
-            table["entries"].append(
-                {"key": _decode_atom(fields[2]), "value": _decode_atom(fields[3])}
-            )
-        else:
-            raise MoonVeilError(f"malformed dump record: {line[:120]!r}")
+        try:
+            if fields[0] == "R" and len(fields) == 2:
+                if root is not None:
+                    raise MoonVeilError("duplicate root record in dump")
+                root = _decode_atom(fields[1])
+            elif fields[0] in {"T", "E"} and len(fields) == (
+                2 if fields[0] == "T" else 4
+            ):
+                table_id = int(fields[1])
+                if table_id <= 0:
+                    raise MoonVeilError("dump table IDs must be positive")
+                table = tables.setdefault(table_id, {"id": table_id, "entries": []})
+                if fields[0] == "T":
+                    if table_id in declared:
+                        raise MoonVeilError(f"duplicate table declaration {table_id}")
+                    declared.add(table_id)
+                else:
+                    table["entries"].append(
+                        {"key": _decode_atom(fields[2]), "value": _decode_atom(fields[3])}
+                    )
+            else:
+                raise MoonVeilError(f"malformed dump record: {line[:120]!r}")
+        except ValueError as exc:
+            raise MoonVeilError(f"malformed dump record: {line[:120]!r}") from exc
 
     if root is None:
         raise MoonVeilError("dump did not contain a root record")
+    if declared != tables.keys():
+        raise MoonVeilError("dump entries refer to undeclared tables")
+    atoms = [root]
+    for table in tables.values():
+        for entry in table["entries"]:
+            atoms.extend((entry["key"], entry["value"]))
+    for atom in atoms:
+        if atom["type"] == "table" and atom["id"] not in declared:
+            raise MoonVeilError(f"dump references undeclared table {atom['id']}")
     ordered = [tables[key] for key in sorted(tables)]
     return {
         "schema": "moonveil-table-graph-v1",
         "root": root,
         "tables": ordered,
     }
-
-
-def find_luau(explicit: Path | None, project_root: Path) -> Path:
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(explicit)
-    env_path = os.environ.get("LUAU_PATH")
-    if env_path:
-        candidates.append(Path(env_path))
-    candidates.extend(
-        [
-            project_root / ".tools" / "luau-0.722" / "luau.exe",
-            project_root / ".tools" / "luau-0.722" / "luau",
-        ]
-    )
-    for name in ("luau.exe", "luau"):
-        found = _which(name)
-        if found:
-            candidates.append(found)
-    for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
-        if resolved.is_file():
-            return resolved
-    raise MoonVeilError(
-        "Luau runtime not found; pass --luau, set LUAU_PATH, or install official Luau"
-    )
-
-
-def _which(name: str) -> Path | None:
-    from shutil import which
-
-    result = which(name)
-    return Path(result) if result else None
 
 
 def run_dump(
@@ -529,8 +518,8 @@ def run_dump(
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
+    write_text(
+        path, json.dumps(value, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
         encoding="utf-8",
     )
 

@@ -78,7 +78,11 @@ def parse_decode_protocol(
         tag = columns[0]
         try:
             if tag == "MVDPROTO" and len(columns) == 3:
-                declared_counts[int(columns[1])] = int(columns[2])
+                prototype_id, count = int(columns[1]), int(columns[2])
+                if prototype_id <= 0 or count < 0 or prototype_id in declared_counts:
+                    raise MoonVeilError("invalid or duplicate prototype declaration")
+                declared_counts[prototype_id] = count
+                current = None
             elif tag == "MVDINST" and len(columns) == 4:
                 prototype_id = int(columns[1])
                 pc = int(columns[2])
@@ -101,6 +105,8 @@ def parse_decode_protocol(
                 ):
                     raise MoonVeilError("orphan MVDFIELD record")
                 current["fields"][str(int(columns[3]))] = decode_token(columns[4])
+            elif tag in {"MVDPROTO", "MVDINST", "MVDFIELD"}:
+                raise MoonVeilError(f"malformed decode protocol line: {raw_line[:200]!r}")
             elif tag in {
                 "MVREG",
                 "MVTABLE",
@@ -136,6 +142,17 @@ def parse_decode_protocol(
 
     if not declared_counts:
         raise MoonVeilError("decode protocol did not declare any prototypes")
+
+    if sorted(declared_counts) != list(range(1, len(declared_counts) + 1)):
+        raise MoonVeilError("prototype IDs must be contiguous and start at one")
+    observed_counts: dict[int, int] = defaultdict(int)
+    for prototype_id, pc in attempts:
+        if prototype_id not in declared_counts or not 1 <= pc <= declared_counts[prototype_id]:
+            raise MoonVeilError("instruction refers to an undeclared prototype or invalid slot")
+        observed_counts[prototype_id] += 1
+    for prototype_id, count in declared_counts.items():
+        if observed_counts[prototype_id] != count:
+            raise MoonVeilError(f"prototype {prototype_id} has missing instruction slots")
 
     prototypes: list[dict[str, Any]] = []
     for prototype_id in sorted(declared_counts):

@@ -1060,7 +1060,7 @@ def create_bot(owner_id):
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
-            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con decodificación instrumentada en Luau; omite la verificación del programa protegido y no lo sube a servicios externos.\n"
+            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con el motor 0.13.0 y decodificación instrumentada en Luau; omite la verificación del programa protegido.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
             "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv` y `.mv` están restringidos al propietario configurado del bot."
         )
