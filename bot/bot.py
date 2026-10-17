@@ -989,6 +989,161 @@ class MoonVeilDeobfuscator:
         await self._stop()
 
 
+class MoonVeilV2Deobfuscator:
+    """Run the narrow MoonVeil 2.1.0 profile in a bounded subprocess."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "mvv2-engine"
+        self.root = Path(os.environ.get("MVV2_ENGINE_DIR", str(default))).resolve()
+        self.cli = self.root / "moonveil" / "cli.py"
+        self.luau_path = Path(
+            os.environ.get("LUAU_PATH", "/usr/local/bin/luau")
+        ).expanduser().resolve()
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(self.root),
+            "LUAU_PATH": str(self.luau_path),
+        }
+
+    async def prepare(self):
+        compiler = self.luau_path.with_name("luau-compile")
+        if (
+            not self.cli.is_file()
+            or not self.luau_path.is_file()
+            or not os.access(self.luau_path, os.X_OK)
+            or not compiler.is_file()
+            or not os.access(compiler, os.X_OK)
+        ):
+            raise ProcessingError(
+                "No encuentro el motor `.mvv2` o Luau/luau-compile. "
+                "Reconstruye y despliega la imagen Docker."
+            )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "moonveil", "--help",
+            cwd=str(self.root), env=self.environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+            help_output = output.lower()
+            if process.returncode or b"usage:" not in help_output or b"decompile" not in help_output:
+                raise ProcessingError("No pude iniciar el motor `.mvv2`.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("El motor `.mvv2` no respondió al iniciar.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), 3)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(process.pid),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+        await process.wait()
+
+    async def run(self, source, timeout=60):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            result = source.parent / "moonveil-v2-output.deobf.lua"
+            result.unlink(missing_ok=True)
+
+            def limit_child_resources():
+                import resource
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 2))
+                resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+                resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+                memory_limit = 768 * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+            command = [
+                sys.executable, "-m", "moonveil", "decompile", str(source.resolve()),
+                "--output", str(result.resolve()), "--require-compile",
+                "--timeout", str(timeout),
+            ]
+            with tempfile.TemporaryFile() as log:
+                process = await asyncio.create_subprocess_exec(
+                    *command, cwd=str(self.root), env=self.environment,
+                    stdout=log, stderr=log, start_new_session=os.name != "nt",
+                    preexec_fn=limit_child_resources if os.name != "nt" else None,
+                )
+                self.process = process
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout + 3)
+                except asyncio.TimeoutError:
+                    raise ProcessingError("El archivo `.mvv2` superó el tiempo permitido.") from None
+                finally:
+                    await self._stop()
+                if process.returncode != 0:
+                    log.seek(0, os.SEEK_END)
+                    log_size = log.tell()
+                    log.seek(max(0, log_size - 8192))
+                    diagnostic = log.read(8192).decode("utf-8", errors="replace").lower()
+                    if any(marker in diagnostic for marker in (
+                        "unsupported moonveil version", "unsupported 2.1.0 profile",
+                        "unsupported prototype layout", "unknown handler",
+                    )):
+                        message = (
+                            "`.mvv2` solo admite el perfil MoonVeil 2.1.0 calibrado; "
+                            "esta variante no coincide o aún no está soportada."
+                        )
+                        reason = "unsupported_profile"
+                    elif "memoryerror" in diagnostic:
+                        message = "`.mvv2` agotó el límite de memoria procesando el archivo."
+                        reason = "memory_limit"
+                    elif "timeout" in diagnostic or "exceeded" in diagnostic:
+                        message = "El archivo `.mvv2` excedió el tiempo permitido."
+                        reason = "timeout"
+                    else:
+                        message = (
+                            f"El motor `.mvv2` terminó con error (código {process.returncode}); "
+                            "el formato puede no coincidir con el perfil compatible."
+                        )
+                        reason = "analyzer_error"
+                    logging.getLogger("bot.mvv2").warning(
+                        "mvv2_failed returncode=%s reason=%s", process.returncode, reason,
+                    )
+                    raise ProcessingError(message)
+                if not result.is_file() or result.stat().st_size == 0:
+                    raise ProcessingError("El motor `.mvv2` no produjo una salida.")
+                if result.stat().st_size > 32 * 1024 * 1024:
+                    raise ProcessingError("El resultado `.mvv2` supera el límite de 32 MiB.")
+                return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class DeobfBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -998,12 +1153,14 @@ class DeobfBot(commands.Bot):
         self.lb_engine = ChaoticEvilDeobfuscator()
         self.iv_engine = IronveilDeobfuscator()
         self.mv_engine = MoonVeilDeobfuscator()
+        self.mvv2_engine = MoonVeilV2Deobfuscator()
         self.engine_errors = {}
 
     async def setup_hook(self):
         for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
                              ("ironbrew", self.ironbrew_engine), ("lb", self.lb_engine),
-                             ("iv", self.iv_engine), ("mv", self.mv_engine)):
+                             ("iv", self.iv_engine), ("mv", self.mv_engine),
+                             ("mvv2", self.mvv2_engine)):
             try:
                 await engine.prepare()
             except (ProcessingError, OSError) as error:
@@ -1021,6 +1178,7 @@ class DeobfBot(commands.Bot):
             await self.lb_engine.close()
             await self.iv_engine.close()
             await self.mv_engine.close()
+            await self.mvv2_engine.close()
 
 
 def create_bot(owner_id):
@@ -1038,6 +1196,7 @@ def create_bot(owner_id):
     lb_cache = ResultCache()
     iv_cache = ResultCache()
     mv_cache = ResultCache()
+    mvv2_cache = ResultCache()
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DeobfBot(
@@ -1046,7 +1205,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .lb, .iv y .mv.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .lb, .iv, .mv y .mvv2.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -1061,8 +1220,9 @@ def create_bot(owner_id):
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
             "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con el motor 0.13.0 y decodificación instrumentada en Luau; omite la verificación del programa protegido.\n"
+            "`.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — prueba recuperación del perfil calibrado MoonVeil 2.1.0; las variantes no reconocidas se rechazan.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv` y `.mv` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv`, `.mv` y `.mvv2` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -1307,7 +1467,7 @@ def create_bot(owner_id):
         if version and version not in LURAPH_VERSIONS:
             await ctx.send("Versión no válida: usa 14.7, 14.8, 14.9 o 15.")
             return
-        extensions = (".lua", ".luau", ".txt") if command in {"luraph", "mv"} else (".lua", ".txt")
+        extensions = (".lua", ".luau", ".txt") if command in {"luraph", "mv", "mvv2"} else (".lua", ".txt")
         url = url.strip().strip("<>")
         attachments = ctx.message.attachments
         if url and attachments:
@@ -1439,6 +1599,10 @@ def create_bot(owner_id):
     @bot.command(name="mv")
     async def mv(ctx, url: str = ""):
         await process_attachment(ctx, url, bot.mv_engine, mv_cache, "mv")
+
+    @bot.command(name="mvv2")
+    async def mvv2(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.mvv2_engine, mvv2_cache, "mvv2")
 
     return bot
 

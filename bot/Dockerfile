@@ -34,6 +34,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LURAPH_RECOVER_DIR=/app/luraph-fusion \
     LURAPH_CACHE_DIR=/app/cache \
     MV_ENGINE_DIR=/app/mv-engine \
+    MVV2_ENGINE_DIR=/app/mvv2-engine \
     LUAU_PATH=/usr/local/bin/luau \
     IRONBREW_DEOBF_PATH=/app/ironbrew/IronbrewAdapter \
     PATH=/opt/venv/bin:$PATH
@@ -63,6 +64,7 @@ COPY result_cache.py ./result_cache.py
 COPY lb-engine ./lb-engine
 COPY iv-engine ./iv-engine
 COPY mv-engine ./mv-engine
+COPY mvv2-engine ./mvv2-engine
 COPY bot.py ./bot.py
 EXPOSE 8080
 CMD ["python", "/app/bot.py"]
