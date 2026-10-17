@@ -1087,7 +1087,7 @@ class MoonVeilV2Deobfuscator:
 
             command = [
                 sys.executable, "-m", "moonveil", "decompile", str(source.resolve()),
-                "--output", str(result.resolve()), "--require-compile",
+                "--output", str(result.resolve()), "--require-compile", "--trace-unsupported",
                 "--timeout", str(timeout),
             ]
             with tempfile.TemporaryFile() as log:
@@ -1219,8 +1219,8 @@ def create_bot(owner_id):
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
-            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con el motor 0.13.0 y decodificación instrumentada en Luau; omite la verificación del programa protegido.\n"
-            "`.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — prueba recuperación del perfil calibrado MoonVeil 2.1.0; las variantes no reconocidas se rechazan.\n"
+            "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con el motor 0.13.0 y decodificación instrumentada; no ejecuta el script protegido ni contacta servicios externos.\n"
+            "`.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera el perfil calibrado MoonVeil 2.1.0; una variante conocida no compatible puede devolver una traza `.txt` (no código fuente).\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
             "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv`, `.mv` y `.mvv2` están restringidos al propietario configurado del bot."
         )
@@ -1553,11 +1553,18 @@ def create_bot(owner_id):
             detail = " (desde caché)" if cached is not None else ""
             if command == "luraph" and result_data.startswith(PARTIAL_HEADER):
                 detail += " — recuperación parcial: algunos bloques no pudieron recuperarse"
-            output_name = "resultado.luac" if command == "ironbrew" else "resultado.lua"
+            is_behavior_trace = command == "mvv2" and result_data.startswith(b"MOONVEIL_BEHAVIOR_TRACE_V1\n")
+            if is_behavior_trace:
+                detail += " — análisis de comportamiento, no es fuente recuperada"
+            output_name = (
+                "resultado.luac" if command == "ironbrew" else
+                "resultado-mvv2-traza.txt" if is_behavior_trace else
+                "resultado.lua"
+            )
             downloadable = discord.File(io.BytesIO(result_data), filename=output_name)
             try:
                 await ctx.send(
-                    f"Resultado en {elapsed:.2f} s{detail}:",
+                    f"{'Traza de comportamiento' if is_behavior_trace else 'Resultado'} en {elapsed:.2f} s{detail}:",
                     file=downloadable,
                 )
             finally:

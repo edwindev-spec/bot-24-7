@@ -147,7 +147,7 @@ PROFILE = {
 }
 
 
-def parse_wrapper(source: str) -> Wrapper:
+def parse_wrapper(source: str, *, require_profile: bool = True) -> Wrapper:
     banner = re.search(r"^\s*-- This script was generated using MoonVeil ([\d.]+)\b", source)
     if not banner or banner[1] != "2.1.0":
         version = banner[1] if banner else "unknown"
@@ -172,8 +172,11 @@ def parse_wrapper(source: str) -> Wrapper:
     if cursor + 6 != len(tail) or [t.text for t in tail[cursor:cursor + 2]] != ["}", ","] or [t.text for t in tail[cursor + 3:]] != [",", "...", ")"]:
         raise MoonVeilError("truncated wrapper invocation or extra statements")
     entry = _literal_name(tail[cursor + 2])
-    if len(names) != 35 or len(set(names)) != len(names):
-        raise MoonVeilError("unsupported wrapper permutation (expected 35 unique names)")
+    if require_profile:
+        if len(names) != 35 or len(set(names)) != len(names):
+            raise MoonVeilError("unsupported wrapper permutation (expected 35 unique names)")
+    elif not 1 <= len(names) <= 64 or len(set(names)) != len(names):
+        raise MoonVeilError("unsupported structural wrapper permutation")
     methods = {}
     positional = 0
     for field in fields:
@@ -182,7 +185,10 @@ def parse_wrapper(source: str) -> Wrapper:
         else:
             if positional >= len(names):
                 raise MoonVeilError("too many positional wrapper fields")
-            name = names[(100151 * positional + 58863) % len(names)]
+            name = (
+                names[(100151 * positional + 58863) % len(names)]
+                if require_profile else f"__slot_{positional}"
+            )
             positional += 1
             body = field
         if name in methods or not body:
@@ -191,12 +197,13 @@ def parse_wrapper(source: str) -> Wrapper:
     if positional != len(names):
         raise MoonVeilError("truncated wrapper method array")
     roles = {}
-    hashes = {name: canonical(body) for name, body in methods.items()}
-    for role, fingerprint in PROFILE.items():
-        matches = [name for name, digest in hashes.items() if digest == fingerprint]
-        if len(matches) != 1:
-            raise MoonVeilError(f"unsupported 2.1.0 profile: {role} handler is missing, modified, or ambiguous")
-        roles[role] = matches[0]
-    if roles["remapper"] != remapper or roles["bootstrap"] != entry:
-        raise MoonVeilError("wrapper entry does not match the supported profile")
+    if require_profile:
+        hashes = {name: canonical(body) for name, body in methods.items()}
+        for role, fingerprint in PROFILE.items():
+            matches = [name for name, digest in hashes.items() if digest == fingerprint]
+            if len(matches) != 1:
+                raise MoonVeilError(f"unsupported 2.1.0 profile: {role} handler is missing, modified, or ambiguous")
+            roles[role] = matches[0]
+        if roles["remapper"] != remapper or roles["bootstrap"] != entry:
+            raise MoonVeilError("wrapper entry does not match the supported profile")
     return Wrapper(source, source[tokens[2].start:tokens[end].end], source[tail[4].start:tail[cursor].end], remapper, entry, methods, roles)

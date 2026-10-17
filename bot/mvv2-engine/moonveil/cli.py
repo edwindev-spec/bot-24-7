@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .behavior import behavior_trace, is_known_trace_variant
 from .decoder import decode
 from .errors import MoonVeilError
 from .runtime import compile_source, find_luau, positive_timeout
@@ -40,6 +41,7 @@ def _parser():
         if name == "decompile":
             command.add_argument("--artifacts", type=Path)
             command.add_argument("--require-compile", action="store_true", help="fail if luau-compile is unavailable")
+            command.add_argument("--trace-unsupported", action="store_true", help="return a sandboxed behavior trace for the one explicitly calibrated fallback sample")
     return parser
 
 
@@ -64,7 +66,21 @@ def main(argv=None):
         if artifacts:
             destinations += [artifacts / name for name in ("decoded.json", "normalized.json", "instructions.txt", "manifest.json")]
         check_destinations(args.input, destinations)
-        wrapper = parse_wrapper(source)
+        try:
+            wrapper = parse_wrapper(source)
+        except MoonVeilError as profile_error:
+            if args.command != "decompile" or not args.trace_unsupported:
+                raise
+            try:
+                structural = parse_wrapper(source, require_profile=False)
+            except MoonVeilError:
+                raise profile_error
+            if not is_known_trace_variant(source, structural):
+                raise profile_error
+            report = behavior_trace(source, structural, luau=args.luau, timeout=args.timeout)
+            write_text(args.output, report)
+            print(f"Behavior trace: {args.output} (not recovered source)")
+            return 0
         luau = find_luau(args.luau)
         graph = decode(wrapper, luau, args.timeout)
         if args.command == "dump":

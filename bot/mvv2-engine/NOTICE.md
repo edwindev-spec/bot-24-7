@@ -4,4 +4,4 @@ El código de `moonveil/` procede del ZIP proporcionado por el usuario y se mant
 
 El runtime `luau` y `luau-compile` se compilan desde el proyecto oficial Luau 0.722, commit `32d52d1b2ceef46fc25d87094a2d7f201c3ea5b8`; su licencia MIT se conserva en `../mv-engine/LUAU_LICENSE.txt`.
 
-La captura ejecuta etapas de bootstrap/deserialización derivadas de la entrada, pero intercepta el constructor antes de despachar la VM protegida. El subproceso del bot tiene límites de recursos y un entorno reducido; esto no es un sandbox de sistema operativo.
+La captura principal ejecuta etapas de bootstrap/deserialización derivadas de la entrada, pero intercepta el constructor antes de despachar la VM protegida. Para una única huella canónica adicional, una traza opcional ejecuta la entrada con globals reducidos, proxies inertes y HTTP interceptado; no obtiene ni ejecuta código remoto y solo produce observaciones, no fuente recuperada. El subproceso del bot tiene límites de recursos y un entorno reducido; esto no es un sandbox de sistema operativo.
