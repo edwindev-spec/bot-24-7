@@ -613,6 +613,138 @@ class IronbrewDeobfuscator:
         await self._stop()
 
 
+class Ironbrew1Deobfuscator:
+    """Run the pinned IronBrew1 tracer/lifter in a resource-limited child."""
+
+    def __init__(self):
+        default = Path(__file__).resolve().parent / "ironbrew1-engine"
+        self.root = Path(os.environ.get("IRONBREW1_ENGINE_DIR", str(default))).resolve()
+        self.deobf = self.root / "deobf"
+        self.cli = self.deobf / "deob.py"
+        self.bin = self.deobf / "bin"
+        self.luau = self.bin / "luau"
+        self.ast = self.bin / "luau-ast"
+        current_uid = os.geteuid() if hasattr(os, "geteuid") else 65534
+        current_gid = os.getegid() if hasattr(os, "getegid") else 65534
+        configured_uid = os.environ.get("IRONBREW1_UID")
+        configured_gid = os.environ.get("IRONBREW1_GID")
+        self.worker_uid = int(configured_uid) if configured_uid else (65534 if current_uid == 0 else current_uid)
+        self.worker_gid = int(configured_gid) if configured_gid else (65534 if current_uid == 0 else current_gid)
+        self.process = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+        self.environment = {
+            "PATH": os.pathsep.join([str(self.bin), os.defpath]),
+            "LANG": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0",
+        }
+
+    async def prepare(self):
+        if os.name != "posix":
+            raise ProcessingError("El motor `.ironbrew1` requiere el contenedor Linux del proyecto.")
+        if self.worker_uid == 0 or self.worker_gid == 0:
+            raise ProcessingError("El motor `.ironbrew1` no permite ejecutarse con privilegios de root.")
+        if os.geteuid() != 0 and (self.worker_uid != os.geteuid() or self.worker_gid != os.getegid()):
+            raise ProcessingError("No puedo cambiar al usuario sin privilegios configurado para `.ironbrew1`.")
+        if (not self.cli.is_file()
+                or any(not path.is_file() or not os.access(path, os.X_OK) for path in (self.luau, self.ast))):
+            raise ProcessingError("No encuentro IronBrew1 o sus binarios Linux Luau/luau-ast; reconstruye el contenedor.")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(self.cli), "--help", cwd=str(self.deobf), env=self.environment,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        )
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=12)
+            if process.returncode or b"ironbrew1" not in output.lower():
+                raise ProcessingError("No pude iniciar el CLI aislado de `.ironbrew1`.")
+        except asyncio.TimeoutError:
+            raise ProcessingError("El CLI `.ironbrew1` no respondió al iniciar.") from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    async def _stop(self):
+        process, self.process = self.process, None
+        if process is None:
+            return
+        if process.returncode is not None:
+            await process.wait()
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), 3)
+        except asyncio.TimeoutError:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+
+    async def run(self, source, timeout=90):
+        async with self.lock:
+            if self.closed:
+                raise ProcessingError("Reinicia el bot antes de procesar otro archivo.")
+            if source.stat().st_size > MAX_INPUT:
+                raise ProcessingError("El archivo `.ironbrew1` debe pesar como máximo 2 MiB.")
+            with tempfile.TemporaryDirectory(prefix="ironbrew1-") as folder:
+                workdir = Path(folder)
+                isolated_source = workdir / "entrada.lua"
+                result = workdir / "resultado.lua"
+                isolated_source.write_bytes(source.read_bytes())
+                if self.worker_uid != os.geteuid():
+                    os.chown(workdir, self.worker_uid, self.worker_gid)
+                    os.chown(isolated_source, self.worker_uid, self.worker_gid)
+
+                def limit_child_resources():
+                    import resource
+                    resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 2))
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024 * 1024, 32 * 1024 * 1024))
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
+                    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+                    memory_limit = 768 * 1024 * 1024
+                    resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+                    resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+                    if self.worker_uid != os.geteuid():
+                        os.setgroups([])
+                        os.setgid(self.worker_gid)
+                        os.setuid(self.worker_uid)
+
+                with tempfile.TemporaryFile() as log:
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable, str(self.cli), str(isolated_source),
+                        "--output", str(result), "--obfuscator", "ironbrew1",
+                        "--timeout", "65", "--budget", "25", "--no-pypy",
+                        cwd=str(workdir), env=self.environment,
+                        stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log,
+                        start_new_session=True, preexec_fn=limit_child_resources,
+                    )
+                    self.process = process
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=timeout + 4)
+                    except asyncio.TimeoutError:
+                        raise ProcessingError("El archivo `.ironbrew1` superó el tiempo permitido.") from None
+                    finally:
+                        await self._stop()
+                    if process.returncode != 0:
+                        raise ProcessingError("IronBrew1 no pudo recuperar este archivo Luau compatible.")
+                    if not result.is_file() or result.stat().st_size == 0:
+                        raise ProcessingError("El motor `.ironbrew1` no produjo una salida.")
+                    if result.stat().st_size > 32 * 1024 * 1024:
+                        raise ProcessingError("El resultado `.ironbrew1` supera el límite de 32 MiB.")
+                    return result.read_bytes()
+
+    async def close(self):
+        self.closed = True
+        await self._stop()
+
+
 class ChaoticEvilDeobfuscator:
     """Run the authorized LuaObfuscatorChaoticEvil parser in static-only mode."""
 
@@ -1150,6 +1282,7 @@ class DeobfBot(commands.Bot):
         self.engine = Deobfuscator()
         self.luraph_engine = LuraphDeobfuscator()
         self.ironbrew_engine = IronbrewDeobfuscator()
+        self.ironbrew1_engine = Ironbrew1Deobfuscator()
         self.lb_engine = ChaoticEvilDeobfuscator()
         self.iv_engine = IronveilDeobfuscator()
         self.mv_engine = MoonVeilDeobfuscator()
@@ -1158,7 +1291,8 @@ class DeobfBot(commands.Bot):
 
     async def setup_hook(self):
         for name, engine in (("deobf", self.engine), ("luraph", self.luraph_engine),
-                             ("ironbrew", self.ironbrew_engine), ("lb", self.lb_engine),
+                             ("ironbrew", self.ironbrew_engine), ("ironbrew1", self.ironbrew1_engine),
+                             ("lb", self.lb_engine),
                              ("iv", self.iv_engine), ("mv", self.mv_engine),
                              ("mvv2", self.mvv2_engine)):
             try:
@@ -1175,6 +1309,7 @@ class DeobfBot(commands.Bot):
             await self.engine.close()
             await self.luraph_engine.close()
             await self.ironbrew_engine.close()
+            await self.ironbrew1_engine.close()
             await self.lb_engine.close()
             await self.iv_engine.close()
             await self.mv_engine.close()
@@ -1193,6 +1328,7 @@ def create_bot(owner_id):
             store = None
     luraph_cache = ResultCache(store=store)
     ironbrew_cache = ResultCache()
+    ironbrew1_cache = ResultCache()
     lb_cache = ResultCache()
     iv_cache = ResultCache()
     mv_cache = ResultCache()
@@ -1205,7 +1341,7 @@ def create_bot(owner_id):
     )
     @bot.event
     async def on_ready():
-        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .lb, .iv, .mv y .mvv2.")
+        print(f"Recover conectado como {bot.user}. Comandos: .help, .get, .deobf, .luraph, .ironbrew, .ironbrew1, .lb, .iv, .mv y .mvv2.")
 
     @bot.command(name="help")
     async def show_help(ctx):
@@ -1218,11 +1354,12 @@ def create_bot(owner_id):
             "`.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación estática para LuaObfuscator Chaotic Evil; best-effort, sin ejecutar el script.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
+            "`.ironbrew1 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — ejecuta IronBrew1 instrumentado en Luau simulado; puede devolver una traza, no fuente recuperada.\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
             "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con el motor 0.13.0 y decodificación instrumentada; no ejecuta el script protegido ni contacta servicios externos.\n"
             "`.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — motor 0.3.0: usa el perfil estático y prueba traza simbólica para otros layouts; una variante conocida con callbacks devuelve un informe `.txt`, no código fuente.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
-            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv`, `.mv` y `.mvv2` están restringidos al propietario configurado del bot."
+            "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.ironbrew1`, `.lb`, `.iv`, `.mv` y `.mvv2` están restringidos al propietario configurado del bot."
         )
 
     @bot.command(name="get")
@@ -1467,7 +1604,7 @@ def create_bot(owner_id):
         if version and version not in LURAPH_VERSIONS:
             await ctx.send("Versión no válida: usa 14.7, 14.8, 14.9 o 15.")
             return
-        extensions = (".lua", ".luau", ".txt") if command in {"luraph", "mv", "mvv2"} else (".lua", ".txt")
+        extensions = (".lua", ".luau", ".txt") if command in {"luraph", "ironbrew1", "mv", "mvv2"} else (".lua", ".txt")
         url = url.strip().strip("<>")
         attachments = ctx.message.attachments
         if url and attachments:
@@ -1481,18 +1618,7 @@ def create_bot(owner_id):
             return
         if url:
             try:
-                parsed = urlsplit(url)
-                if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
-                    raise ValueError
-                hostname = parsed.hostname.rstrip(".").lower()
-                if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".localhost", ".local")):
-                    raise ValueError
-                try:
-                    address = ipaddress.ip_address(hostname)
-                except ValueError:
-                    address = None
-                if address is not None and not address.is_global:
-                    raise ValueError
+                validate_public_http_url(url)
             except (ValueError, UnicodeError):
                 await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
                 return
@@ -1501,7 +1627,10 @@ def create_bot(owner_id):
         try:
             if url:
                 timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=15)
-                async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver())
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=False, connector=connector
+                ) as session:
                     async with session.get(url, allow_redirects=False) as response:
                         if 300 <= response.status < 400:
                             raise ProcessingError("La URL redirige. Usa el enlace directo al archivo raw.")
@@ -1551,20 +1680,30 @@ def create_bot(owner_id):
             await asyncio.gather(progress, return_exceptions=True)
             elapsed = time.perf_counter() - started
             detail = " (desde caché)" if cached is not None else ""
+            if command == "ironbrew1":
+                detail += " — ejecución instrumentada en Luau simulado"
             if command == "luraph" and result_data.startswith(PARTIAL_HEADER):
                 detail += " — recuperación parcial: algunos bloques no pudieron recuperarse"
             is_behavior_trace = command == "mvv2" and result_data.startswith(b"MOONVEIL_BEHAVIOR_TRACE_V1\n")
+            is_ironbrew1_trace = (
+                command == "ironbrew1"
+                and b"-- source: " in result_data[:2048]
+                and b"-- run status:" in result_data[:2048]
+            )
             if is_behavior_trace:
                 detail += " — análisis de comportamiento, no es fuente recuperada"
+            if is_ironbrew1_trace:
+                detail += " — traza de comportamiento, no es fuente recuperada"
             output_name = (
                 "resultado.luac" if command == "ironbrew" else
                 "resultado-mvv2-traza.txt" if is_behavior_trace else
+                "resultado-ironbrew1-traza.txt" if is_ironbrew1_trace else
                 "resultado.lua"
             )
             downloadable = discord.File(io.BytesIO(result_data), filename=output_name)
             try:
                 await ctx.send(
-                    f"{'Traza de comportamiento' if is_behavior_trace else 'Resultado'} en {elapsed:.2f} s{detail}:",
+                    f"{'Traza de comportamiento' if is_behavior_trace or is_ironbrew1_trace else 'Resultado'} en {elapsed:.2f} s{detail}:",
                     file=downloadable,
                 )
             finally:
@@ -1594,6 +1733,10 @@ def create_bot(owner_id):
     @bot.command(name="ironbrew")
     async def ironbrew(ctx, url: str = ""):
         await process_attachment(ctx, url, bot.ironbrew_engine, ironbrew_cache, "ironbrew")
+
+    @bot.command(name="ironbrew1")
+    async def ironbrew1(ctx, url: str = ""):
+        await process_attachment(ctx, url, bot.ironbrew1_engine, ironbrew1_cache, "ironbrew1")
 
     @bot.command(name="lb")
     async def lb(ctx, url: str = ""):

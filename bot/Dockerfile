@@ -27,6 +27,25 @@ RUN cmake -S /src/luau -B /src/luau-build -DCMAKE_BUILD_TYPE=Release \
     && install -D /src/luau-build/luau /out/luau \
     && install -D /src/luau-build/luau-compile /out/luau-compile
 
+FROM debian:bookworm-slim AS ironbrew1-luau-build
+ARG IRONBREW1_LUAU_COMMIT=a62362a53ddc9c629b0e29378a84abb4534d8b64
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git cmake build-essential python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /src/luau \
+    && git -C /src/luau remote add origin https://github.com/luau-lang/luau.git \
+    && git -C /src/luau fetch --depth=1 origin ${IRONBREW1_LUAU_COMMIT} \
+    && git -C /src/luau checkout --detach FETCH_HEAD \
+    && test "$(git -C /src/luau rev-parse HEAD)" = "${IRONBREW1_LUAU_COMMIT}"
+RUN python3 -c 'from pathlib import Path; p=Path("/src/luau/VM/src/lveclib.cpp"); s=p.read_text(); old="    lua_setreadonly(L, -1, true);\n    lua_pop(L, 1); // pop the metatable\n"; new="    // deobf: envlog.luau supplies Roblox Vector3 methods\n    lua_pop(L, 1); // pop the metatable\n"; assert s.count(old)==1; p.write_text(s.replace(old,new))'
+RUN cmake -S /src/luau -B /src/luau-build -DCMAKE_BUILD_TYPE=Release \
+    -DLUAU_BUILD_CLI=ON -DLUAU_BUILD_TESTS=OFF -DLUAU_BUILD_WEB=OFF \
+    && cmake --build /src/luau-build --target Luau.Repl.CLI Luau.Ast.CLI --parallel 2 \
+    && install -D /src/luau-build/luau /out/luau \
+    && install -D /src/luau-build/luau-ast /out/luau-ast \
+    && printf 'return 1\n' > /tmp/ironbrew1-ast-smoke.lua \
+    && /out/luau-ast /tmp/ironbrew1-ast-smoke.lua | grep -q '"AstStatBlock"'
+
 FROM node:22-bookworm-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -35,6 +54,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LURAPH_CACHE_DIR=/app/cache \
     MV_ENGINE_DIR=/app/mv-engine \
     MVV2_ENGINE_DIR=/app/mvv2-engine \
+    IRONBREW1_ENGINE_DIR=/app/ironbrew1-engine \
+    IRONBREW1_UID=65534 \
+    IRONBREW1_GID=65534 \
     LUAU_PATH=/usr/local/bin/luau \
     IRONBREW_DEOBF_PATH=/app/ironbrew/IronbrewAdapter \
     PATH=/opt/venv/bin:$PATH
@@ -57,6 +79,9 @@ RUN git init /app/prometheus-recover \
 COPY --from=ironbrew-build /out/ /app/ironbrew/
 COPY --from=ironbrew-build /src/IronbrewDeobfuscator/LICENSE /app/licenses/IRONBREW-GPL-3.0.txt
 COPY --from=luau-build /out/ /usr/local/bin/
+COPY ironbrew1-engine /app/ironbrew1-engine
+COPY --from=ironbrew1-luau-build /out/ /app/ironbrew1-engine/deobf/bin/
+COPY --from=ironbrew1-luau-build /src/luau/LICENSE /app/licenses/LUAU-0.739-MIT.txt
 COPY prepare_engine.py ./prepare_engine.py
 COPY luraph-fusion /app/luraph-fusion
 RUN python3 /app/prepare_engine.py --skip-dependencies --jobs 2
@@ -64,7 +89,8 @@ COPY result_cache.py ./result_cache.py
 COPY lb-engine ./lb-engine
 COPY iv-engine ./iv-engine
 COPY mv-engine ./mv-engine
-COPY mvv2-engine ./mvv2-engine
+COPY mvv2-engine /app/mvv2-engine
 COPY bot.py ./bot.py
+RUN python3 -c 'import asyncio; from bot import Ironbrew1Deobfuscator; asyncio.run(Ironbrew1Deobfuscator().prepare())'
 EXPOSE 8080
 CMD ["python", "/app/bot.py"]

@@ -1,25 +1,27 @@
 # Servicio del bot
 
-Esta carpeta se despliega como contenedor Docker persistente. Configura `DISCORD_TOKEN` y `DISCORD_OWNER_ID` como secretos/variables en el proveedor. `PORT` lo proporciona el hosting. El servicio publica `/health` para los health checks y el panel web.
+Esta carpeta se despliega como contenedor Docker persistente. Configura `DISCORD_TOKEN` y `DISCORD_OWNER_ID` como secretos/variables en el proveedor. `PORT` lo proporciona el hosting. El servicio publica `/health` para health checks y el panel web. No ejecutes el bot como una Vercel Function: necesita una conexión continua con Discord Gateway.
 
-No ejecutes el bot como una Vercel Function: necesita una conexión continua con Discord Gateway.
+`.help` lista los comandos. Los comandos de descarga/análisis están restringidos a `DISCORD_OWNER_ID`:
 
-`.help` lista todos los comandos y sus usos. Los comandos de análisis están restringidos a `DISCORD_OWNER_ID`:
+- `.deobf`: motor Prometheus; acepta adjunto `.lua`/`.txt` o URL directa.
+- `.luraph`: procesa `.lua`, `.luau` o `.txt` (máx. 2 MiB) para Luraph v14.7–v15; si no se detecta versión, indícala, por ejemplo `.luraph 14.8`.
+- `.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB): Ironbrew2, salida bytecode Lua 5.1 `resultado.luac`.
+- `.ironbrew1 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB): recupera IronBrew1 mediante ejecución instrumentada en Luau 0.739 y un entorno Roblox simulado. No es análisis puramente estático; si no se capturan protos puede entregar `resultado-ironbrew1-traza.txt`, una traza y no código fuente.
+- `.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB): LuaObfuscator Chaotic Evil mediante análisis estático; no ejecuta el Lua recibido, recuperación best-effort.
+- `.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB): intenta recuperar Ironveil V1 y devuelve Lua como `resultado.lua`.
+- `.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB): recuperación de MoonVeil V1.4.5, best-effort; no ejecuta el archivo ni lo sube a servicios externos.
+- `.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB): recuperación estática para un perfil calibrado o traza simbólica para layouts compatibles; ciertas variantes entregan un informe, no fuente.
+- `.get <URL>`: GET a URLs/APIs HTTP(S) públicas (máx. 2 MiB); comprueba respuestas DNS y redirecciones, bloquea IP privadas y no permite degradar HTTPS a HTTP. No omite controles de acceso.
 
-- `.deobf`: conserva el motor Prometheus ya integrado y acepta un adjunto `.lua`/`.txt` o URL directa.
-- `.ironbrew <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): devuelve bytecode Lua 5.1 como `resultado.luac`.
-- `.lb <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): prueba LuaObfuscator Chaotic Evil mediante análisis estático solamente; no ejecuta el Lua recibido. La recuperación es best-effort.
-- `.iv <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): intenta recuperar Ironveil V1 y devuelve código Lua como `resultado.lua`.
-- `.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (hasta 2 MiB): recuperación estática best-effort de MoonVeil V1.4.5; no ejecuta el archivo ni lo sube a servicios externos.
-- `.luraph`: procesa `.lua`, `.luau` o `.txt` (hasta 2 MiB) para Luraph v14.7–v15; si no se detecta la versión, indica una con el adjunto, por ejemplo `.luraph 14.8`.
-- `.get <URL>`: hace GET a URLs y APIs HTTP(S) públicas (hasta 2 MiB); formatea JSON válido como `raw.json` (con vista previa si es pequeño) y otros contenidos como `raw.txt`. Comprueba todos los IP devueltos por DNS y cada destino de hasta cinco redirecciones, bloquea direcciones privadas y no permite degradar HTTPS a HTTP.
+`.get` distingue errores 401/403/429/204 y reintenta hasta tres veces solo en errores de conexión y respuestas 429/5xx, respetando `Retry-After` hasta 5 s. Los logs registran estado/latencia y cabeceras permitidas; se redactan query values, cookies y credenciales, y no se guarda el cuerpo.
 
-En errores de API, `.get` distingue `401` (autenticación), `403` (acceso bloqueado), `429` (límite, incluyendo `Retry-After`) y `204` (sin contenido). No intenta omitir controles de acceso del servidor.
+## Despliegue y procedencia
 
-Ante errores transitorios de conexión y respuestas `429`/`5xx`, realiza hasta tres intentos totales y respeta `Retry-After` si es de 5 segundos o menos; nunca reintenta `403` ni rota cabeceras para evitar bloqueos.
+Después de cambiar archivos, reconstruye y despliega la imagen Docker; reiniciar una imagen antigua no incorpora la actualización. El Dockerfile raíz compila Luau 0.739 y `luau-ast` desde el commit fijado, con una adaptación de Vector3 necesaria para el entorno simulado del motor IronBrew1; se incluye su licencia MIT. El motor Ironbrew2 se compila desde un commit fijado bajo GPL-3.0; los binarios Luau específicos de IronBrew1 no se guardan en el repositorio.
 
-Los logs del servicio registran cada intento `.get` (`get_request`/`get_response`), status HTTP, latencia y cabeceras auditables. Los valores de query, cookies, credenciales y valores de cabeceras desconocidas se redactan/omiten; no se guardan cuerpos. Configura `LOG_LEVEL` para ajustar el nivel de logs (por defecto `INFO`).
+El motor `.ironbrew1` proviene de `larpcorrupt/luraph-v15-v14.x-deobfuscator`, commit `ed79a86cc41187af0480e69f45a4838723fdb099`. El usuario indicó que tiene autorización para reutilizar y redistribuirlo; upstream no publica una licencia explícita para esos archivos. Ver `ironbrew1-engine/UPSTREAM.md` y `ironbrew1-engine/IRONBREW1.md`.
 
-Tras cambiar archivos o añadir el motor, reconstruye y despliega la imagen Docker; reiniciar un contenedor anterior no incorpora la actualización. El motor Luraph se incluye con su licencia y se compila durante el build. Ironbrew se obtiene en un commit fijado y se compila como .NET 8 en la etapa Docker; la imagen incluye su licencia GPL-3.0. `.lb` se distribuye con permiso confirmado por el usuario; el upstream no declara licencia y el modo instalado es estático, sin Lupa. `.iv` se incluye bajo MIT; se deshabilitó el helper upstream basado en `eval`. `.mv` se incluye bajo MIT y usa únicamente el análisis estático del perfil MoonVeil 1.4.5. Los procesos externos tienen timeout y límites de recursos.
+En Docker, el proceso hijo `.ironbrew1` se ejecuta como UID/GID 65534 (`nobody`), sin variables de entorno del bot, con límites de tiempo, CPU, memoria, tamaño de archivo, procesos y descriptores; las URLs usan un resolver que rechaza cualquier respuesta DNS no pública. Esto reduce riesgos, pero no equivale a aislamiento de kernel/VM ni garantiza recuperación para todo input.
 
-La caché de disco conserva únicamente resultados recuperados verificados (hasta 128 MiB y 256 entradas), no los archivos de entrada. El valor predeterminado `/app/cache` puede ser efímero. Para persistirla, monta un volumen del hosting en `/data` y configura `LURAPH_CACHE_DIR=/data/luraph-cache`; para desactivar la caché de disco, deja la variable vacía. Requiere configurar en el hosting las variables Discord habituales.
+El motor Luraph conserva licencia y herramientas; `.lb` opera en modo estático sin Lupa y `.iv` deshabilita el helper basado en `eval`. Los motores externos usan límites de tiempo/recursos. La caché puede conservar resultados recuperados (no entradas) hasta 128 MiB/256 elementos; `/app/cache` puede ser efímero. Para persistirla, monta un volumen en `/data` y configura `LURAPH_CACHE_DIR=/data/luraph-cache`; para desactivar la caché en disco, deja esa variable vacía.

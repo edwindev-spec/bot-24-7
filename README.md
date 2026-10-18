@@ -18,7 +18,7 @@ En Render, crea un Web Service desde el repositorio, usa `bot` como Root Directo
 ### Variables obligatorias
 
 - `DISCORD_TOKEN`: token del bot de Discord. Guárdalo solo como secreto del proveedor; nunca lo subas a GitHub ni lo pongas en la web.
-- `DISCORD_OWNER_ID`: tu ID numérico de usuario de Discord. `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv` y `.mv` solo responden a ese ID.
+- `DISCORD_OWNER_ID`: tu ID numérico de usuario de Discord. `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.ironbrew1`, `.lb`, `.iv`, `.mv` y `.mvv2` solo responden a ese ID.
 - `PORT`: lo establece automáticamente el proveedor; localmente el bot usa `8080`.
 
 Activa **Message Content Intent** en Discord Developer Portal. Invita el bot al servidor con permisos para ver mensajes, leer el contenido y enviar mensajes/archivos.
@@ -39,6 +39,7 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 
 - `.deobf`: conserva el motor Prometheus ya integrado; acepta adjunto `.lua`/`.txt` o URL directa.
 - `.ironbrew <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): devuelve bytecode Lua 5.1 como `resultado.luac`.
+- `.ironbrew1 <URL>` o adjunta `.lua`/`.luau`/`.txt` (hasta 2 MiB): ejecuta el programa protegido de forma instrumentada en Luau 0.739 contra un entorno Roblox simulado. No es estático; si no captura protos, entrega `resultado-ironbrew1-traza.txt`, no fuente recuperada.
 - `.lb <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): prueba recuperación **estática** para LuaObfuscator Chaotic Evil; devuelve Lua de texto. No ejecuta el script y los resultados son best-effort.
 - `.iv <URL>` o adjunta `.lua`/`.txt` (hasta 2 MiB): intenta recuperar Ironveil V1 y devuelve Lua de texto en `resultado.lua`.
 - `.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (hasta 2 MiB): recupera MoonVeil V1.4.5 con el motor 0.13.0; ejecuta dos probes independientes en paralelo y omite la comparación de comportamiento del programa protegido. Las entradas repetidas aprovechan la caché acotada en memoria de la sesión.
@@ -49,9 +50,9 @@ Envía `.help` en Discord para ver la lista de comandos y sus usos.
 - Reintenta como máximo tres intentos totales ante errores transitorios de conexión y respuestas `429`/`5xx`, respetando `Retry-After` hasta 5 s. No reintenta `403` ni cambia cabeceras para eludir bloqueos.
 - La auditoría de `.get` aparece en los logs estándar del servicio (`get_request`, `get_response` y reintentos): registra método, URL saneada, cabeceras permitidas, status y latencia. Se ocultan valores de consulta, credenciales, cookies y cabeceras no reconocidas; nunca se registra el cuerpo de la respuesta. `LOG_LEVEL` permite ajustar el nivel (por defecto `INFO`).
 
-`.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv`, `.mv` y `.mvv2` solo responden al `DISCORD_OWNER_ID` configurado.
+`.get`, `.deobf`, `.luraph`, `.ironbrew`, `.ironbrew1`, `.lb`, `.iv`, `.mv` y `.mvv2` solo responden al `DISCORD_OWNER_ID` configurado.
 
-Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render. El motor Luraph va incluido como fuente licenciada y sus herramientas se compilan durante la construcción. Luau oficial 0.722 también se compila desde el commit fijado y se comparte entre `.mv` y `.mvv2`; reiniciar un contenedor antiguo no incorpora estas actualizaciones.
+Después de actualizar los archivos, **reconstruye y despliega la imagen Docker** en Railway/Render. El motor Luraph va incluido como fuente licenciada y sus herramientas se compilan durante la construcción. Luau oficial 0.722 se comparte entre `.mv` y `.mvv2`; Luau 0.739 y `luau-ast` se compilan desde un commit fijado para `.ironbrew1`. Reiniciar un contenedor antiguo no incorpora estas actualizaciones.
 
 ### Caché Luraph
 
@@ -63,6 +64,7 @@ El bot conserva hasta 256 resultados verificados (máximo 128 MiB) en SQLite. La
 - La ruta `/health` revela únicamente estado de conexión, nombre de cuenta del bot y tiempo de proceso; no devuelve secretos.
 - El motor Prometheus se obtiene del commit fijado `98e1d89faeddbe8d478a9b72df58d13d43a2b765`; el motor Luraph Fusion incluido se fija en `0d2becf3eb4122784b187214a20397703b5a634f` y mantiene sus avisos/licencias de terceros.
 - Ironbrew Deobfuscator se compila desde `Lethal-Luka/IronbrewDeobfuscator` en el commit fijado `43dfbd8fcff52c1f0b9d1ad32ae45142c03683d4`, bajo GPL-3.0; su licencia se incluye en la imagen Docker.
+- `.ironbrew1` integra `larpcorrupt/luraph-v15-v14.x-deobfuscator` desde `ed79a86cc41187af0480e69f45a4838723fdb099`; el usuario indicó que cuenta con autorización para reutilizar y redistribuirlo, pero el upstream no declara una licencia explícita. El motor ejecuta el protegido dentro del runtime Luau 0.739 y un entorno Roblox simulado para capturar protos; no ejecuta en Roblox ni accede a sus APIs reales. El hijo Docker corre como UID/GID 65534 sin el entorno del bot y con límites de tiempo, CPU, memoria, archivos y descriptores. Esta contención no es aislamiento de kernel/VM. Ver `bot/ironbrew1-engine/UPSTREAM.md` y `bot/ironbrew1-engine/SECURITY.md`.
 - `.lb` integra `lovesyko/LuaObfuscatorChaoticEvilDeobfuscator` desde `7a3a80ce5ee1f9909bcdf85148b82d1a4c03208d`, con permiso del usuario confirmado en esta conversación. El upstream no declara licencia; la copia vendorizada elimina la ejecución dinámica/Lupa y corre solo análisis estático, aislado con límites de recursos. Ver `bot/lb-engine/NOTICE.md`.
 - `.iv` integra Ironveil Deobfuscator V1 desde `prostone55/Ironveil-Deobfuscator-V1` en el commit `64b27cfd0cb80919ccefdc8a2e61d6f7d742fb5a`, con licencia MIT incluida. El parser trabaja sobre el texto/bytecode; se deshabilitó el helper upstream que usaba `eval` y el proceso tiene límites de memoria/CPU/tiempo.
 - `.mv` integra `edwindev-spec/MoonVeil` versión `0.13.0` desde `a948c4849a692f0af40d554708cac28b610c5115`, bajo MIT, derivado del upstream UnstableGrape; también usa Luau oficial `0.722` desde `32d52d1b2ceef46fc25d87094a2d7f201c3ea5b8`, bajo MIT. El bot ejecuta como máximo dos probes de decodificación simultáneos y limita el proceso por tiempo, CPU, memoria, tamaño de archivos y descriptores; los resultados exitosos se mantienen en una caché LRU en memoria. El decoder instrumentado ejecuta etapas de bootstrap, por lo que no es análisis puramente estático ni aislamiento de sistema operativo. Ver `bot/mv-engine/NOTICE.md`.
