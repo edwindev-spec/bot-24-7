@@ -1087,7 +1087,7 @@ class MoonVeilV2Deobfuscator:
 
             command = [
                 sys.executable, "-m", "moonveil", "decompile", str(source.resolve()),
-                "--output", str(result.resolve()), "--require-compile", "--trace-unsupported",
+                "--output", str(result.resolve()), "--require-compile", "--mode", "auto", "--trace-unsupported",
                 "--timeout", str(timeout),
             ]
             with tempfile.TemporaryFile() as log:
@@ -1220,7 +1220,7 @@ def create_bot(owner_id):
             "`.ironbrew <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — desofusca Ironbrew2 y devuelve bytecode Lua 5.1 (`.luac`).\n"
             "`.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación de Ironveil V1 y devuelve Lua como `resultado.lua`.\n"
             "`.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera MoonVeil V1.4.5 con el motor 0.13.0 y decodificación instrumentada; no ejecuta el script protegido ni contacta servicios externos.\n"
-            "`.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — recupera el perfil calibrado MoonVeil 2.1.0; una variante conocida no compatible puede devolver una traza `.txt` (no código fuente).\n"
+            "`.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB) — motor 0.3.0: usa el perfil estático y prueba traza simbólica para otros layouts; una variante conocida con callbacks devuelve un informe `.txt`, no código fuente.\n"
             "Si el archivo Luraph no tiene cabecera, adjúntalo y escribe `.luraph 14.8` (también admite 14.7, 14.9 y 15).\n"
             "Los comandos `.get`, `.deobf`, `.luraph`, `.ironbrew`, `.lb`, `.iv`, `.mv` y `.mvv2` están restringidos al propietario configurado del bot."
         )

@@ -1,9 +1,13 @@
+import contextlib
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bot" / "mvv2-engine"))
 
+from moonveil import cli
 from moonveil.behavior import behavior_trace, is_known_trace_variant
 from moonveil.errors import MoonVeilError
 from moonveil.source import parse_wrapper, tokenize
@@ -35,6 +39,16 @@ class MoonVeilTraceGateTests(unittest.TestCase):
         self.assertFalse(is_known_trace_variant(source, wrapper))
         with self.assertRaisesRegex(MoonVeilError, "no behavior-trace profile"):
             behavior_trace(source, wrapper, luau=Path("/does/not/exist"))
+
+    def test_auto_mode_rejects_non_moonveil_source_before_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "plain.lua"
+            source.write_text("print('not a MoonVeil wrapper')\n", encoding="utf-8")
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                code = cli.main(["decompile", str(source), "--mode", "auto"])
+        self.assertEqual(code, 2)
+        self.assertIn("only structurally recognized MoonVeil 2.1.0 wrappers", errors.getvalue())
 
 
 if __name__ == "__main__":

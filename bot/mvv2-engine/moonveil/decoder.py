@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
+import re
 import tempfile
 from pathlib import Path
 
 from .errors import MoonVeilError
-from .runtime import run_bounded
-from .source import Wrapper
+from .runtime import DEFAULT_MEMORY_MB, run_bounded
+from .source import SEMANTIC_ROLES, Wrapper
 
 _CAPTURE = r'''
 local object = __TABLE__
@@ -76,7 +78,7 @@ object["__REMAPPER__"](object, __NAMES__, "__moonveil_capture")
 def instrument(wrapper: Wrapper) -> str:
     factories = "{" + ",".join(
         f'["{role}"]="{name}"' for role, name in wrapper.roles.items()
-        if role in {"loadk", "getglobal", "self", "call", "call_return", "nop", "xor_index", "xor_reverse"}
+        if role in SEMANTIC_ROLES
     ) + "}"
     # Single-pass substitution: input text can itself contain placeholder strings.
     replacements = {
@@ -87,7 +89,6 @@ def instrument(wrapper: Wrapper) -> str:
         "__REMAPPER__": wrapper.remapper,
         "__NAMES__": wrapper.names_source,
     }
-    import re
     return re.sub("|".join(re.escape(key) for key in replacements), lambda m: replacements[m[0]], _CAPTURE)
 
 
@@ -126,6 +127,7 @@ def parse_dump(stdout: str):
     if end <= begin:
         raise MoonVeilError("invalid decoded graph boundary")
     root, tables, handlers = None, {}, {}
+    seen_keys = {}
     for line in lines[begin + 1:end]:
         fields = line.split("\t")
         try:
@@ -133,7 +135,7 @@ def parse_dump(stdout: str):
                 root = _atom(fields[1])
             elif fields[0] == "H" and len(fields) == 3:
                 key = int(fields[1])
-                if key in handlers or fields[2] not in {"loadk", "getglobal", "self", "call", "call_return", "nop", "xor_index", "xor_reverse"}:
+                if key in handlers or fields[2] not in SEMANTIC_ROLES:
                     raise MoonVeilError("invalid or duplicate handler")
                 handlers[key] = fields[2]
             elif fields[0] == "T" and len(fields) == 2:
@@ -141,13 +143,16 @@ def parse_dump(stdout: str):
                 if key <= 0 or key in tables:
                     raise MoonVeilError("invalid or duplicate table")
                 tables[key] = []
+                seen_keys[key] = set()
             elif fields[0] == "E" and len(fields) == 4:
                 key = int(fields[1])
                 if key not in tables:
                     raise MoonVeilError("entry refers to an undeclared table")
                 atom_key, value = _atom(fields[2]), _atom(fields[3])
-                if atom_key["type"] == "nil" or any(e["key"] == atom_key for e in tables[key]):
+                identity = json.dumps(atom_key, sort_keys=True)
+                if atom_key["type"] == "nil" or identity in seen_keys[key]:
                     raise MoonVeilError("nil or duplicate table key")
+                seen_keys[key].add(identity)
                 tables[key].append({"key": atom_key, "value": value})
             else:
                 raise MoonVeilError("malformed or duplicate dump record")
@@ -165,9 +170,10 @@ def parse_dump(stdout: str):
             "tables": [{"id": key, "entries": tables[key]} for key in sorted(tables)]}
 
 
-def decode(wrapper: Wrapper, luau: Path, timeout: float):
+def decode(wrapper: Wrapper, luau: Path, timeout: float, memory_mb: int = DEFAULT_MEMORY_MB):
     with tempfile.TemporaryDirectory(prefix="moonveil-decode-") as directory:
         script = Path(directory) / "capture.luau"
         script.write_text(instrument(wrapper), encoding="utf-8")
-        stdout, _ = run_bounded([str(luau), str(script)], cwd=script.parent, timeout=timeout)
+        stdout, _ = run_bounded([str(luau), str(script)], cwd=script.parent, timeout=timeout,
+                                memory_mb=memory_mb, label="luau")
     return parse_dump(stdout)

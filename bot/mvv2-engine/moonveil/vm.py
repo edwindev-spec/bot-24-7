@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+from .emit import emit, lua_literal  # noqa: F401  (re-exported for callers and tests)
 from .errors import MoonVeilError
 
 _FIELDS = {1, 3, 4, 8, 9, 10, 12, 13, 16, 17, 20, 27, 29}
@@ -135,111 +136,6 @@ def normalize(graph):
         raise MoonVeilError("prototype has no supported terminating return")
     return {"schema": "moonveil-2.1.0-ir-v1", "stack_size": stack, "parameter_count": params,
             "instructions": instructions, "strings": strings}
-
-
-def lua_literal(value):
-    if isinstance(value, bytes):
-        parts = []
-        for byte in value:
-            if byte in (34, 92):
-                parts.append("\\" + chr(byte))
-            elif 32 <= byte < 127:
-                parts.append(chr(byte))
-            else:
-                # Fixed three-digit escapes cannot merge with following digits.
-                parts.append(f"\\{byte:03d}")
-        return '"' + "".join(parts) + '"'
-    if value is None:
-        return "nil"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if type(value) in (int, float):
-        return repr(value)
-    raise MoonVeilError("unsupported Luau constant")
-
-
-def _global(value):
-    return "environment[" + lua_literal(value) + "]"
-
-
-def _loader_source(ir):
-    """Recognize a fully checked, straight-line nested call expression.
-
-    Both open-result calls remain in final argument position, preserving all
-    returns (including nil). No URL, register number or global name is assumed.
-    """
-    ops = [ins for ins in ir["instructions"] if ins["op"] != "nop"]
-    if ir["parameter_count"] or len(ops) != 7:
-        return None
-    first, obj, constant, method, inner, outer, final = ops
-    if [ins["op"] for ins in ops] != ["getglobal", "getglobal", "loadk", "self", "call", "call", "call_return"]:
-        return None
-    a, b = first["a"], obj["a"]
-    if len({a, b, constant["a"]}) != 3 or b != a + 1 or method["a"] != b or method["b"] != b or constant["a"] != b + 2:
-        return None
-    if (inner["a"], inner["b"], inner["c"]) != (b, 3, 0) or (outer["a"], outer["b"], outer["c"]) != (a, 0, 2):
-        return None
-    if (final["a"], final["b"], final["c"], final["return_b"]) != (a, 1, 1, 1):
-        return None
-    # Named locals preserve global-read order and evaluate the object only once.
-    # Calling through a local also preserves arbitrary method keys and receiver.
-    return "\n".join([
-        "-- Recovered from MoonVeil 2.1.0; original names and comments are unavailable.",
-        "local environment = getfenv()",
-        f"local recovered_function = {_global(first['value'])}",
-        f"local receiver = {_global(obj['value'])}",
-        f"local method = receiver[{lua_literal(method['value'])}]",
-        f"recovered_function(method(receiver, {lua_literal(constant['value'])}))()",
-        "return", "",
-    ])
-
-
-def emit(ir):
-    compact = _loader_source(ir)
-    if compact:
-        return compact, "nested-calls"
-    lines = [
-        "-- Recovered from MoonVeil 2.1.0; registers retain VM numbering.",
-        "local environment = getfenv()",
-        "local pack, unpack = table.pack, table.unpack",
-        "local r = {}",
-        "local top = -1",
-    ]
-    if ir["parameter_count"]:
-        targets = ", ".join(f"r[{index}]" for index in range(1, ir["parameter_count"] + 1))
-        lines.append(targets + " = ...")
-    for ins in ir["instructions"]:
-        op = ins["op"]
-        if op == "nop":
-            continue
-        a = ins["a"]
-        lines.append(f"-- PC {ins['pc']}: {op}")
-        if op in {"loadk", "getglobal"}:
-            expr = lua_literal(ins["value"]) if op == "loadk" else _global(ins["value"])
-            lines.append(f"r[{a}] = {expr}")
-        elif op == "self":
-            # The second write uses the saved receiver, even when A == B.
-            lines.append(f"r[{a + 1}] = r[{ins['b']}]")
-            lines.append(f"r[{a}] = r[{a + 1}][{lua_literal(ins['value'])}]")
-        else:
-            end = "top" if ins["b"] == 0 else str(a + ins["b"] - 1)
-            call = f"r[{a}](unpack(r, {a + 1}, {end}))"
-            c = ins["c"]
-            if c == 1:
-                lines.append(call)
-            else:
-                lines.extend(["do", f"    local values = pack({call})"])
-                limit = "values.n" if c == 0 else str(c - 1)
-                lines.append(f"    for index = 1, {limit} do r[{a} + index - 1] = values[index] end")
-                if c == 0:
-                    lines.append(f"    top = {a} + values.n - 1")
-                lines.append("end")
-            if op == "call_return":
-                start, n = ins["return_a"], ins["return_b"]
-                end = "top" if n == 0 else str(start + n - 2)
-                lines.append("return" if n == 1 else f"return unpack(r, {start}, {end})")
-                break
-    return "\n".join(lines) + "\n", "registers"
 
 
 def json_ir(ir):
