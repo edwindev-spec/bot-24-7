@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import re
+import random
 import signal
 import socket
 import sys
@@ -1349,7 +1350,7 @@ def create_bot(owner_id):
         await ctx.send(
             "**Comandos disponibles**\n"
             "`.help` — Muestra esta lista.\n"
-            "`.get <URL>` — Hace GET a URLs/APIs HTTP(S) públicas (máx. 2 MiB); entrega JSON legible como `raw.json` y texto como `raw.txt`, validando DNS y redirecciones.\n"
+            "`.get <URL>` — Hace GET a URLs/APIs HTTP(S) públicas (máx. 2 MiB); entrega JSON legible y conserva nombres seguros del endpoint, validando DNS y redirecciones.\n"
             "`.deobf` — Recupera código Prometheus desde un adjunto `.lua`/`.txt` o una URL directa.\n"
             "`.lb <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB) — prueba recuperación estática para LuaObfuscator Chaotic Evil; best-effort, sin ejecutar el script.\n"
             "`.luraph` — Recupera Luraph v14.7–v15 desde un adjunto `.lua`/`.luau`/`.txt` o una URL directa.\n"
@@ -1364,237 +1365,448 @@ def create_bot(owner_id):
 
     @bot.command(name="get")
     async def get_raw(ctx, url: str = ""):
-        """Fetch a public HTTP(S) text URL and return its content as a .txt file."""
+        """Fetch a public HTTP(S) text URL and return its content as a downloadable file."""
         if ctx.author.id != owner_id:
             return
+
         url = url.strip().strip("<>")
         if not url:
             await ctx.send("Uso: `.get <URL>`")
             return
+
         try:
             parsed = validate_public_http_url(url)
         except (ValueError, UnicodeError):
-            await ctx.send("URL no válida. Usa una URL pública que empiece por `https://` o `http://`.")
+            await ctx.send(
+                "URL no válida. Usa una URL pública que empiece por `https://` o `http://`."
+            )
             return
 
-        timeout = aiohttp.ClientTimeout(total=12, connect=8, sock_read=10)
-        request_headers = {
+        # ── Configuración centralizada ───────────────────────────────────────────
+        TOTAL_DEADLINE = 35.0
+        MAX_REDIRECTS = 5
+        CONNECT_TIMEOUT = 8.0
+        SOCK_READ_TIMEOUT = 10.0
+        ATTEMPT_TIMEOUT = 12.0
+        CHUNK_SIZE = 64 * 1024
+        PREVIEW_BYTES = 12288
+
+        REQUEST_HEADERS = {
             "User-Agent": "PrometheusRecoverBot/1.0 (+Discord URL fetcher)",
-            "Accept": "application/json, application/problem+json, text/plain;q=0.9, application/octet-stream;q=0.8, text/html;q=0.5, */*;q=0.2",
+            "Accept": (
+                "application/json, application/problem+json, text/plain;q=0.9, "
+                "application/octet-stream;q=0.8, text/html;q=0.5, */*;q=0.2"
+            ),
         }
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TOTAL_DEADLINE
         current_url = url
         https_required = parsed.scheme == "https"
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 35
+        redirect_count = 0
+        final_status: int | None = None
+        final_headers: dict | None = None
+        raw_data: bytes | None = None
+        content_type: str | None = None
+
+        # ── Helpers internos ─────────────────────────────────────────────────────
+        def remaining_time() -> float:
+            return max(0.0, deadline - loop.time())
+
+        def make_timeout() -> aiohttp.ClientTimeout:
+            rem = remaining_time()
+            return aiohttp.ClientTimeout(
+                total=min(ATTEMPT_TIMEOUT, rem),
+                connect=min(CONNECT_TIMEOUT, rem),
+                sock_read=min(SOCK_READ_TIMEOUT, rem),
+            )
+
+        def is_protection_page(url: str, body_preview: str) -> bool:
+            url_l = url.lower()
+            body_l = body_preview.lower()
+            return (
+                "yisus-hub.vercel.app/protection" in url_l
+                or ("protección del endpoint" in body_l and "solicitud navegador" in body_l)
+                or "this endpoint is protected" in body_l
+                or ("protected by" in body_l and "script protection" in body_l)
+                or ("access denied" in body_l and "cloudflare" in body_l)
+                or ("just a moment" in body_l and "cloudflare" in body_l)
+                or "checking your browser" in body_l
+                or "enable javascript and cookies" in body_l
+            )
+
+        def safe_filename(name: str, is_json: bool) -> str:
+            name = name.replace("\\", "/").rsplit("/", 1)[-1]
+            name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+            name = re.sub(r"[^\w.() -]", "_", name, flags=re.UNICODE).strip(" .")[:120]
+            return name if name not in ("", ".", "..") else ("raw.json" if is_json else "raw.txt")
+
+        def extract_filename(headers: dict, url: str, is_json: bool) -> str:
+            # 1. Content-Disposition
+            cd = headers.get("Content-Disposition") or headers.get("content-disposition")
+            if cd:
+                # filename*=UTF-8''... o filename="..."
+                import re
+                match = re.search(
+                    r"filename\*=UTF-8''([^;]+)|filename=\"([^\"]+)\"|filename=([^;]+)",
+                    cd,
+                    re.IGNORECASE,
+                )
+                if match:
+                    name = next(g for g in match.groups() if g)
+                    name = name.strip().strip('"')
+                    if name:
+                        return safe_filename(name, is_json)
+
+            # 2. Path de la URL
+            from urllib.parse import urlparse, unquote
+            path = unquote(urlparse(url).path)
+            if path and path not in ("/", ""):
+                base = path.rsplit("/", 1)[-1]
+                if base and "." in base:
+                    return safe_filename(base, is_json)
+
+            return "raw.json" if is_json else "raw.txt"
+
+        def build_error_message(status: int, headers: dict, body_sample: bytes) -> str:
+            detail = None
+            try:
+                data = json.loads(body_sample)
+                if isinstance(data, dict):
+                    for key in ("message", "detail", "error_description", "error", "title", "msg"):
+                        val = data.get(key)
+                        if isinstance(val, str) and val.strip():
+                            detail = " ".join(val.split())[:160]
+                            break
+            except (ValueError, TypeError, RecursionError):
+                pass
+
+            if status == 401:
+                msg = (
+                    "HTTP 401: la API requiere autenticación. "
+                    "`.get` solo envía solicitudes GET públicas y no añade tokens."
+                )
+            elif status == 403:
+                msg = (
+                    "HTTP 403: el servidor bloqueó o no autorizó la solicitud. "
+                    "`.get` no puede saltarse ese control."
+                )
+            elif status == 429:
+                retry_after = headers.get("Retry-After")
+                suffix = f" Reintenta después de: {retry_after[:80]}." if retry_after else ""
+                msg = f"HTTP 429: la API limitó las solicitudes.{suffix} No se volverá a intentar automáticamente."
+            else:
+                retry_after = headers.get("Retry-After")
+                suffix = (
+                    f" El servidor indica reintentar después de: {retry_after[:80]}."
+                    if retry_after
+                    else ""
+                )
+                msg = f"La URL respondió con HTTP {status}; no se creó el archivo.{suffix}"
+
+            if detail and status not in (401, 403, 429):
+                msg += f"\nDetalle de la API: {discord.utils.escape_markdown(detail)}"
+            return msg
+
+        # ── Fetch principal ──────────────────────────────────────────────────────
         try:
             connector = aiohttp.TCPConnector(
-                resolver=PublicOnlyResolver(), use_dns_cache=True, ttl_dns_cache=60,
+                resolver=PublicOnlyResolver(),
+                use_dns_cache=True,
+                ttl_dns_cache=60,
+                limit=8,
+                limit_per_host=3,
+                enable_cleanup_closed=True,
+                force_close=False,
             )
+
             async with aiohttp.ClientSession(
-                timeout=timeout, trust_env=False, headers=request_headers,
-                connector=connector, cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=aiohttp.ClientTimeout(total=ATTEMPT_TIMEOUT),
+                trust_env=False,
+                headers=REQUEST_HEADERS,
+                connector=connector,
+                cookie_jar=aiohttp.DummyCookieJar(),
             ) as session:
-                # Follow redirects manually; retry only transient failures, never HTTP 403.
-                for _ in range(6):
+
+                while True:
+                    # Seguridad: revalidar SIEMPRE
                     try:
-                        parsed = validate_public_http_url(current_url, require_https=https_required)
+                        parsed = validate_public_http_url(
+                            current_url, require_https=https_required
+                        )
                     except (ValueError, UnicodeError):
-                        await ctx.send("La URL o una redirección apunta a una dirección no permitida.")
+                        await ctx.send(
+                            "La URL o una redirección apunta a una dirección no permitida."
+                        )
                         return
+
                     https_required = https_required or parsed.scheme == "https"
 
-                    redirected = False
+                    if remaining_time() <= 0:
+                        raise asyncio.TimeoutError
+
+                    success = False
                     for attempt in range(MAX_FETCH_ATTEMPTS):
-                        remaining = deadline - loop.time()
-                        if remaining <= 0:
+                        if remaining_time() <= 0:
                             raise asyncio.TimeoutError
-                        attempt_timeout = aiohttp.ClientTimeout(
-                            total=min(12, remaining), connect=min(8, remaining),
-                            sock_read=min(10, remaining),
-                        )
-                        retry_delay = None
-                        request_started = time.perf_counter()
+
                         safe_url = redact_url_for_log(current_url)
+                        started = time.perf_counter()
+
                         HTTP_LOGGER.info(
                             "get_request method=GET attempt=%d/%d url=%s headers=%s",
                             attempt + 1, MAX_FETCH_ATTEMPTS, safe_url,
-                            json.dumps(redact_http_headers_for_log(request_headers), ensure_ascii=False, sort_keys=True),
+                            json.dumps(
+                                redact_http_headers_for_log(REQUEST_HEADERS),
+                                ensure_ascii=False, sort_keys=True,
+                            ),
                         )
+
                         try:
                             async with session.get(
-                                current_url, allow_redirects=False, timeout=attempt_timeout,
-                            ) as response:
+                                current_url,
+                                allow_redirects=False,
+                                timeout=make_timeout(),
+                            ) as resp:
+                                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                                final_status = resp.status
+                                final_headers = dict(resp.headers)
                                 actual_request_headers = getattr(
-                                    getattr(response, "request_info", None), "headers", request_headers,
+                                    getattr(resp, "request_info", None), "headers", REQUEST_HEADERS
                                 )
+                                content_type = (
+                                    resp.headers.get("Content-Type")
+                                    or resp.headers.get("content-type")
+                                    or ""
+                                )
+
                                 HTTP_LOGGER.info(
-                                    "get_response status=%d attempt=%d/%d url=%s headers_elapsed_ms=%d "
+                                    "get_response status=%d attempt=%d/%d url=%s elapsed_ms=%d "
                                     "request_headers=%s response_headers=%s",
-                                    response.status, attempt + 1, MAX_FETCH_ATTEMPTS, safe_url,
-                                    int((time.perf_counter() - request_started) * 1000),
-                                    json.dumps(redact_http_headers_for_log(actual_request_headers, current_url),
-                                               ensure_ascii=False, sort_keys=True),
-                                    json.dumps(redact_http_headers_for_log(response.headers, current_url),
-                                               ensure_ascii=False, sort_keys=True),
+                                    resp.status, attempt + 1, MAX_FETCH_ATTEMPTS,
+                                    safe_url, elapsed_ms,
+                                    json.dumps(
+                                        redact_http_headers_for_log(actual_request_headers, current_url),
+                                        ensure_ascii=False, sort_keys=True,
+                                    ),
+                                    json.dumps(
+                                        redact_http_headers_for_log(resp.headers, current_url),
+                                        ensure_ascii=False, sort_keys=True,
+                                    ),
                                 )
-                                if response.status in RETRYABLE_HTTP_STATUSES and attempt < MAX_FETCH_ATTEMPTS - 1:
-                                    retry_delay = retry_wait_seconds(
-                                        response.headers.get("Retry-After"), attempt,
+
+                                # Redirect
+                                if resp.status in (301, 302, 303, 307, 308):
+                                    location = resp.headers.get("Location")
+                                    if not location:
+                                        await ctx.send(
+                                            "El servidor devolvió una redirección sin destino."
+                                        )
+                                        return
+                                    redirect_count += 1
+                                    if redirect_count > MAX_REDIRECTS:
+                                        await ctx.send(
+                                            f"Demasiadas redirecciones (máximo {MAX_REDIRECTS})."
+                                        )
+                                        return
+                                    current_url = urljoin(current_url, location)
+                                    success = True
+                                    break
+
+                                if resp.status == 204:
+                                    await ctx.send(
+                                        "HTTP 204 No Content — la solicitud fue correcta "
+                                        "pero no hay contenido para descargar."
                                     )
-                                    if retry_delay is not None and loop.time() + retry_delay < deadline:
-                                        # Do not read an arbitrary retry body; closing it releases the socket safely.
+                                    return
+
+                                # Reintentos por status
+                                if (
+                                    resp.status in RETRYABLE_HTTP_STATUSES
+                                    and attempt < MAX_FETCH_ATTEMPTS - 1
+                                ):
+                                    delay = retry_wait_seconds(
+                                        resp.headers.get("Retry-After"), attempt
+                                    )
+                                    if delay is not None and loop.time() + delay < deadline:
                                         HTTP_LOGGER.warning(
-                                            "get_retry reason=http_status status=%d attempt=%d/%d "
-                                            "wait_seconds=%.2f url=%s",
-                                            response.status, attempt + 1, MAX_FETCH_ATTEMPTS,
-                                            retry_delay, safe_url,
+                                            "get_retry reason=http_status status=%d "
+                                            "attempt=%d wait=%.2f url=%s",
+                                            resp.status, attempt + 1, delay, safe_url,
                                         )
-                                    else:
-                                        retry_delay = None
-                                if retry_delay is None:
-                                    if response.status in (301, 302, 303, 307, 308):
-                                        location = response.headers.get("Location")
-                                        if not location:
-                                            await ctx.send("El servidor devolvió una redirección sin destino.")
-                                            return
-                                        current_url = urljoin(current_url, location)
-                                        redirected = True
-                                    elif response.status == 204:
-                                        await ctx.send("La API respondió HTTP 204 No Content; la solicitud fue correcta, pero no hay contenido para descargar.")
-                                        return
-                                    elif not 200 <= response.status < 300:
-                                        error_body = await response.content.read(512)
-                                        detail = None
-                                        try:
-                                            error_json = json.loads(error_body)
-                                            if isinstance(error_json, dict):
-                                                for key in ("message", "detail", "error_description", "error", "title"):
-                                                    candidate = error_json.get(key)
-                                                    if isinstance(candidate, str) and candidate.strip():
-                                                        detail = " ".join(candidate.split())[:160]
-                                                        break
-                                        except (ValueError, TypeError, RecursionError):
-                                            pass
-                                        if response.status == 401:
-                                            message = "HTTP 401: la API requiere autenticación; `.get` solo envía solicitudes GET públicas y no añade tokens."
-                                        elif response.status == 403:
-                                            message = "HTTP 403: el servidor bloqueó o no autorizó la solicitud. `.get` no puede saltarse ese control; el dueño de la API debe permitir el acceso desde el bot o indicar un método oficial."
-                                        elif response.status == 429:
-                                            retry_after = response.headers.get("Retry-After")
-                                            suffix = f" Reintenta después de: {retry_after[:80]}." if retry_after else ""
-                                            message = f"HTTP 429: la API limitó las solicitudes.{suffix} No se volverá a intentar automáticamente."
-                                        else:
-                                            retry_after = response.headers.get("Retry-After")
-                                            suffix = f" El servidor indica reintentar después de: {retry_after[:80]}." if retry_after else ""
-                                            message = f"La URL respondió con HTTP {response.status}; no se creó el archivo.{suffix}"
-                                        if detail and response.status not in (401, 403, 429):
-                                            safe_detail = discord.utils.escape_markdown(detail)
-                                            message += f" Detalle de la API: {safe_detail}"
-                                        await ctx.send(message)
-                                        return
-                                    else:
-                                        if response.content_length is not None and response.content_length > MAX_INPUT:
-                                            await ctx.send("El contenido supera el límite de 2 MiB.")
-                                            return
-                                        chunks = []
-                                        total = 0
-                                        async for chunk in response.content.iter_chunked(64 * 1024):
-                                            total += len(chunk)
-                                            if total > MAX_INPUT:
-                                                await ctx.send("El contenido supera el límite de 2 MiB.")
-                                                return
-                                            chunks.append(chunk)
-                                        raw_data = b"".join(chunks)
-                                        HTTP_LOGGER.info(
-                                            "get_body_complete status=%d attempt=%d/%d url=%s "
-                                            "bytes=%d elapsed_ms=%d",
-                                            response.status, attempt + 1, MAX_FETCH_ATTEMPTS,
-                                            safe_url, len(raw_data),
-                                            int((time.perf_counter() - request_started) * 1000),
+                                        await asyncio.sleep(delay)
+                                        continue
+
+                                # Error definitivo
+                                if not (200 <= resp.status < 300):
+                                    sample = await resp.content.read(512)
+                                    msg = build_error_message(
+                                        resp.status, resp.headers, sample
+                                    )
+                                    await ctx.send(msg)
+                                    return
+
+                                # Límite de tamaño
+                                if (
+                                    resp.content_length is not None
+                                    and resp.content_length > MAX_INPUT
+                                ):
+                                    await ctx.send("El contenido supera el límite de 2 MiB.")
+                                    return
+
+                                chunks: list[bytes] = []
+                                total = 0
+                                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                                    total += len(chunk)
+                                    if total > MAX_INPUT:
+                                        await ctx.send(
+                                            "El contenido supera el límite de 2 MiB."
                                         )
-                        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as error:
+                                        return
+                                    chunks.append(chunk)
+
+                                raw_data = b"".join(chunks)
+
+                                HTTP_LOGGER.info(
+                                    "get_body_complete status=%d bytes=%d url=%s",
+                                    resp.status, len(raw_data), safe_url,
+                                )
+                                success = True
+                                break
+
+                        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
                             HTTP_LOGGER.warning(
-                                "get_connection_error attempt=%d/%d url=%s error_type=%s",
-                                attempt + 1, MAX_FETCH_ATTEMPTS, safe_url, type(error).__name__,
+                                "get_connection_error attempt=%d/%d url=%s error=%s",
+                                attempt + 1, MAX_FETCH_ATTEMPTS, safe_url, type(exc).__name__,
                             )
                             if attempt >= MAX_FETCH_ATTEMPTS - 1:
                                 raise
-                            retry_delay = min(0.5 * (2 ** attempt), 2.0)
-                            if loop.time() + retry_delay >= deadline:
-                                raise asyncio.TimeoutError
-                            HTTP_LOGGER.warning(
-                                "get_retry reason=connection_error attempt=%d/%d "
-                                "wait_seconds=%.2f url=%s",
-                                attempt + 1, MAX_FETCH_ATTEMPTS, retry_delay, safe_url,
+
+                            delay = min(
+                                0.35 * (2 ** attempt) + random.uniform(0.05, 0.35), 2.8
                             )
-                        if retry_delay is not None:
-                            await asyncio.sleep(retry_delay)
-                            continue
+                            if loop.time() + delay >= deadline:
+                                raise asyncio.TimeoutError
+                            await asyncio.sleep(delay)
+
+                    if not success:
                         break
-                    if redirected:
+
+                    # Si fue redirect → seguir el while
+                    if final_status in (301, 302, 303, 307, 308):
                         continue
                     break
-                else:
-                    await ctx.send("La URL tiene demasiadas redirecciones (máximo 5).")
-                    return
+
         except asyncio.TimeoutError:
-            await ctx.send("La descarga superó el tiempo límite total de 35 segundos, incluidos los reintentos.")
+            await ctx.send(
+                f"La descarga superó el tiempo límite total de {int(TOTAL_DEADLINE)} segundos "
+                "(incluyendo reintentos)."
+            )
             return
         except (aiohttp.ClientError, OSError):
-            await ctx.send(f"No pude descargar esa URL tras hasta {MAX_FETCH_ATTEMPTS} intentos. Comprueba que sea pública y accesible.")
+            await ctx.send(
+                f"No pude descargar esa URL tras hasta {MAX_FETCH_ATTEMPTS} intentos. "
+                "Comprueba que sea pública y accesible."
+            )
             return
 
-        # Some protected endpoints redirect to an explanatory HTML page instead of returning the script.
-        preview = raw_data[:8192].decode("utf-8-sig", errors="replace").lower()
-        if "yisus-hub.vercel.app/protection" in current_url.lower() or (
-            "protección del endpoint" in preview and "solicitud navegador" in preview
-        ):
-            await ctx.send("El endpoint redirigió a su página de protección en lugar de devolver el contenido del script. `.get` ya sigue redirecciones públicas, pero el servidor debe permitir el acceso directo al endpoint para obtener el loader.")
+        if raw_data is None:
+            await ctx.send("No se obtuvo contenido de la URL.")
             return
 
-        # Keep text readable and pretty-print valid JSON API responses.
-        text_data = raw_data.decode("utf-8-sig", errors="replace").encode("utf-8")
+        # ── Post-procesado ───────────────────────────────────────────────────────
+        preview = raw_data[:PREVIEW_BYTES].decode("utf-8-sig", errors="replace")
+
+        if is_protection_page(current_url, preview):
+            await ctx.send(
+                "El endpoint redirigió a su página de protección en lugar de devolver "
+                "el contenido. `.get` sigue redirecciones públicas, pero el servidor "
+                "debe permitir el acceso directo al endpoint."
+            )
+            return
+
+        # Decodificar
+        text_bytes = raw_data.decode("utf-8-sig", errors="replace").encode("utf-8")
+
         upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
-        output_data = text_data
-        filename = "raw.txt"
-        json_preview = None
+        output_data = text_bytes
+        is_json = False
+        json_preview: str | None = None
         json_compact = False
+
+        # Intentar JSON
         try:
-            json_value = json.loads(text_data)
-            pretty_json = (json.dumps(json_value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-            compact_json = json.dumps(json_value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        except (ValueError, TypeError, RecursionError):
-            pretty_json = compact_json = None
-        if pretty_json is not None:
-            filename = "raw.json"
-            if len(pretty_json) <= upload_limit:
-                output_data = pretty_json
-                json_preview = pretty_json.decode("utf-8").rstrip()
-            elif len(compact_json) <= upload_limit:
-                output_data = compact_json
+            parsed_json = json.loads(text_bytes)
+            pretty = (
+                json.dumps(parsed_json, ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n"
+            ).encode("utf-8")
+            compact = json.dumps(
+                parsed_json, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+
+            is_json = True
+            if len(pretty) <= upload_limit:
+                output_data = pretty
+                json_preview = pretty.decode("utf-8").rstrip()
+            elif len(compact) <= upload_limit:
+                output_data = compact
                 json_compact = True
             else:
-                await ctx.send("La respuesta JSON formateada supera el límite de archivos de este servidor de Discord.")
+                await ctx.send(
+                    "La respuesta JSON formateada supera el límite de archivos de este servidor."
+                )
                 return
+        except (ValueError, TypeError, RecursionError):
+            pass
+
         if len(output_data) > upload_limit:
-            await ctx.send("El archivo resultante supera el límite de archivos de este servidor de Discord.")
+            await ctx.send(
+                "El archivo resultante supera el límite de archivos de este servidor."
+            )
             return
+
+        filename = extract_filename(final_headers or {}, current_url, is_json)
+
+        # Aviso si parece HTML inesperado
+        html_warning = ""
+        if not is_json and (
+            content_type.startswith("text/html")
+            or preview.lstrip().lower().startswith(("<!doctype", "<html", "<head"))
+        ):
+            html_warning = (
+                "\n⚠️ El contenido parece ser HTML (posible página de error/protección)."
+            )
+
+        # ── Mensaje final ────────────────────────────────────────────────────────
+        size = len(output_data)
+        redirect_info = (
+            f" • {redirect_count} redirección{'es' if redirect_count != 1 else ''}"
+            if redirect_count
+            else ""
+        )
+        status_info = f" • HTTP {final_status}" if final_status else ""
+        type_info = f" • {content_type.split(';')[0].strip()}" if content_type else ""
+
+        meta = f"({size} bytes{redirect_info}{status_info}{type_info})"
+
         downloadable = discord.File(io.BytesIO(output_data), filename=filename)
-        if filename == "raw.json":
-            if json_compact:
-                message = f"JSON descargado como `raw.json` ({len(output_data)} bytes); se dejó compacto para respetar el límite de archivos."
-            elif json_preview is not None and len(json_preview) <= 900:
-                safe_preview = json_preview.replace("```", "``\u200b`")
-                message = f"Respuesta JSON formateada ({len(output_data)} bytes):\n```json\n{safe_preview}\n```"
-            else:
-                message = f"Respuesta JSON formateada y descargada como `raw.json` ({len(output_data)} bytes)."
-        else:
-            message = f"Contenido descargado ({len(output_data)} bytes):"
+
         try:
-            await ctx.send(message, file=downloadable)
+            if is_json:
+                if json_compact:
+                    msg = f"JSON descargado como `{filename}` {meta} (compacto por límite).{html_warning}"
+                elif json_preview and len(json_preview) <= 900:
+                    safe = json_preview.replace("```", "``\u200b`")
+                    msg = f"JSON formateado {meta}:{html_warning}\n```json\n{safe}\n```"
+                else:
+                    msg = f"JSON formateado y descargado como `{filename}` {meta}.{html_warning}"
+            else:
+                msg = f"Contenido descargado como `{filename}` {meta}.{html_warning}"
+
+            await ctx.send(msg, file=downloadable)
         finally:
             downloadable.close()
-
     async def process_attachment(ctx, url, engine, cache, command, version=""):
         if ctx.author.id != owner_id:
             return

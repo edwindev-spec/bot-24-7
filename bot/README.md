@@ -12,7 +12,7 @@ Esta carpeta se despliega como contenedor Docker persistente. Configura `DISCORD
 - `.iv <URL>` o adjunta `.lua`/`.txt` (máx. 2 MiB): intenta recuperar Ironveil V1 y devuelve Lua como `resultado.lua`.
 - `.mv <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB): recuperación de MoonVeil V1.4.5, best-effort; no ejecuta el archivo ni lo sube a servicios externos.
 - `.mvv2 <URL>` o adjunta `.lua`/`.luau`/`.txt` (máx. 2 MiB): recuperación estática para un perfil calibrado o traza simbólica para layouts compatibles; ciertas variantes entregan un informe, no fuente.
-- `.get <URL>`: GET a URLs/APIs HTTP(S) públicas (máx. 2 MiB); comprueba respuestas DNS y redirecciones, bloquea IP privadas y no permite degradar HTTPS a HTTP. No omite controles de acceso.
+- `.get <URL>`: GET a URLs/APIs HTTP(S) públicas (máx. 2 MiB); formatea JSON válido y conserva nombres de archivo del endpoint solo tras eliminar rutas y caracteres de control. Comprueba DNS/redirecciones, bloquea IP privadas y no permite degradar HTTPS a HTTP. No omite controles de acceso.
 
 `.get` distingue errores 401/403/429/204 y reintenta hasta tres veces solo en errores de conexión y respuestas 429/5xx, respetando `Retry-After` hasta 5 s. Los logs registran estado/latencia y cabeceras permitidas; se redactan query values, cookies y credenciales, y no se guarda el cuerpo.
 

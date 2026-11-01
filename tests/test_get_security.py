@@ -141,7 +141,8 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
         ctx.send = send
         await app.get_command("help").callback(ctx)
         self.assertIn("APIs HTTP(S) públicas", ctx.sent[0])
-        self.assertIn("raw.json", ctx.sent[0])
+        self.assertIn("JSON legible", ctx.sent[0])
+        self.assertIn("nombres seguros", ctx.sent[0])
         await app.close()
 
     async def run_get(self, url, responses):
@@ -177,14 +178,22 @@ class GetHandlerTests(unittest.IsolatedAsyncioTestCase):
         await app.close()
         return ctx, session
 
-    async def test_success_returns_raw_txt(self):
+    async def test_success_preserves_safe_url_filename(self):
         ctx, session = await self.run_get(
             "https://example.com/script.lua", [FakeResponse(length=3, chunks=(b"abc",))]
         )
         self.assertEqual(session.requested, ["https://example.com/script.lua"])
         message, kwargs = ctx.sent[-1]
         self.assertIn("3 bytes", message)
-        self.assertEqual(kwargs["file"].filename, "raw.txt")
+        self.assertEqual(kwargs["file"].filename, "script.lua")
+
+    async def test_untrusted_content_disposition_filename_is_sanitized(self):
+        response = FakeResponse(
+            headers={"Content-Disposition": 'attachment; filename="../../bad\nname.lua"'},
+            length=3, chunks=(b"abc",),
+        )
+        ctx, _session = await self.run_get("https://example.com/download", [response])
+        self.assertEqual(ctx.sent[-1][1]["file"].filename, "badname.lua")
 
     async def test_json_api_is_pretty_printed_and_previewed(self):
         body = b'{"ok":true,"items":[1,2]}'
