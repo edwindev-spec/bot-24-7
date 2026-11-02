@@ -268,7 +268,21 @@ class ResultCache:
 
 async def delayed_progress(ctx):
     await asyncio.sleep(1)
-    await ctx.send("Procesando…")
+    return await ctx.send("Procesando…")
+
+
+async def clear_progress(task):
+    task.cancel()
+    results = await asyncio.gather(task, return_exceptions=True)
+    if not results or isinstance(results[0], BaseException):
+        return
+    message = results[0]
+    delete = getattr(message, "delete", None)
+    if callable(delete):
+        try:
+            await delete()
+        except discord.HTTPException:
+            pass
 
 
 class Deobfuscator:
@@ -1888,8 +1902,6 @@ def create_bot(owner_id):
             upload_limit = ctx.guild.filesize_limit if ctx.guild else 10 * 1024 * 1024
             if len(result_data) > upload_limit:
                 raise ProcessingError("El resultado supera el límite de archivos de Discord.")
-            progress.cancel()
-            await asyncio.gather(progress, return_exceptions=True)
             elapsed = time.perf_counter() - started
             detail = " (desde caché)" if cached is not None else ""
             if command == "ironbrew1":
@@ -1929,8 +1941,7 @@ def create_bot(owner_id):
         except Exception:
             await ctx.send("No pude completar la operación. Revisa el archivo y los permisos del bot.")
         finally:
-            progress.cancel()
-            await asyncio.gather(progress, return_exceptions=True)
+            await clear_progress(progress)
 
     @bot.command(name="deobf")
     async def deobf(ctx, url: str = ""):
